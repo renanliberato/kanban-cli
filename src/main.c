@@ -5,17 +5,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
 
 static char *default_board_path(void)
 {
     const char *home = getenv("HOME");
     if (!home) return NULL;
 
-    size_t len  = strlen(home) + strlen("/.kanban.json") + 1;
+    size_t len  = strlen(home) + strlen("/.kanban/default.db") + 1;
     char  *path = malloc(len);
     if (!path) return NULL;
 
-    snprintf(path, len, "%s/.kanban.json", home);
+    snprintf(path, len, "%s/.kanban/default.db", home);
     return path;
 }
 

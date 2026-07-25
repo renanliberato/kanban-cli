@@ -54,6 +54,44 @@ static int tests_fail  = 0;
     } \
 } while(0)
 
+/* helper: derive .db path from a .json path for cleanup */
+static char *derive_db_path(const char *json_path)
+{
+    size_t len = strlen(json_path);
+    char *db_path = malloc(len + 2);
+    if (!db_path) return NULL;
+    memcpy(db_path, json_path, len - 5);  /* strip ".json" */
+    memcpy(db_path + len - 5, ".db", 4);
+    return db_path;
+}
+
+/* helper: clean up both .json and .db files */
+static void cleanup(const char *json_path)
+{
+    unlink(json_path);
+    char *db_path = derive_db_path(json_path);
+    if (db_path) {
+        unlink(db_path);
+        /* also try -wal and -shm WAL files */
+        size_t dblen = strlen(db_path);
+        char *wal = malloc(dblen + 5);
+        char *shm = malloc(dblen + 5);
+        if (wal) {
+            memcpy(wal, db_path, dblen);
+            memcpy(wal + dblen, "-wal", 5);
+            unlink(wal);
+            free(wal);
+        }
+        if (shm) {
+            memcpy(shm, db_path, dblen);
+            memcpy(shm + dblen, "-shm", 5);
+            unlink(shm);
+            free(shm);
+        }
+        free(db_path);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 
 static void test_add_cards(void)
@@ -142,10 +180,12 @@ static void test_move_across_all_columns(void)
 static void test_save_load_roundtrip(void)
 {
     const char *path = "/tmp/test_kanban_roundtrip.json";
-    unlink(path);
+    cleanup(path);
 
-    /* build board */
-    Board b1 = board_new();
+    /* build board — use board_load to establish db connection first */
+    Board b1;
+    ASSERT_EQ(board_load(&b1, path), 0, "board_load empty path succeeds");
+
     board_add_card(&b1, COL_TODO, "alpha");
     board_add_card(&b1, COL_TODO, "beta");
     board_add_card(&b1, COL_DOING, "gamma");
@@ -153,10 +193,13 @@ static void test_save_load_roundtrip(void)
 
     ASSERT_EQ(board_save(&b1, path), 0, "board_save succeeds");
 
+    int b1_next_id = b1.next_id;
+    board_free(&b1);
+
     Board b2;
     ASSERT_EQ(board_load(&b2, path), 0, "board_load succeeds");
 
-    ASSERT_EQ(b2.next_id, b1.next_id, "next_id preserved after load");
+    ASSERT_EQ(b2.next_id, b1_next_id, "next_id preserved after load");
     ASSERT_EQ(b2.columns[COL_TODO].count, 2, "2 cards in To Do after load");
     ASSERT_EQ(b2.columns[COL_DOING].count, 1, "1 card in Doing after load");
     ASSERT_EQ(b2.columns[COL_DONE].count, 1, "1 card in Done after load");
@@ -165,37 +208,44 @@ static void test_save_load_roundtrip(void)
     ASSERT_STREQ(b2.columns[COL_TODO].cards[0].title, "alpha", "card 0 title preserved");
     ASSERT_STREQ(b2.columns[COL_TODO].cards[1].title, "beta", "card 1 title preserved");
 
-    board_free(&b1);
     board_free(&b2);
-    unlink(path);
+    cleanup(path);
 }
 
 static void test_load_missing_file(void)
 {
+    const char *path = "/tmp/nonexistent_kanban_test_file.json";
+    cleanup(path);
+
     Board b;
-    int ret = board_load(&b, "/tmp/nonexistent_kanban_test_file.json");
+    int ret = board_load(&b, path);
     ASSERT_EQ(ret, 0, "load missing file returns 0");
     ASSERT_EQ(b.next_id, 1, "missing file gives default next_id=1");
     ASSERT_EQ(b.columns[COL_TODO].count, 0, "missing file gives empty To Do");
     board_free(&b);
+    cleanup(path);
 }
 
 static void test_save_empty_board(void)
 {
     const char *path = "/tmp/test_kanban_empty.json";
-    unlink(path);
+    cleanup(path);
 
-    Board b = board_new();
+    /* use board_load to establish db connection */
+    Board b;
+    ASSERT_EQ(board_load(&b, path), 0, "board_load empty path succeeds");
     ASSERT_EQ(board_save(&b, path), 0, "save empty board succeeds");
+
+    int next_id_1 = b.next_id;
+    board_free(&b);
 
     Board b2;
     ASSERT_EQ(board_load(&b2, path), 0, "load empty board succeeds");
-    ASSERT_EQ(b2.next_id, 1, "empty load has next_id=1");
+    ASSERT_EQ(b2.next_id, next_id_1, "empty load has same next_id");
     ASSERT_EQ(b2.columns[COL_TODO].count, 0, "empty load has no cards");
 
-    board_free(&b);
     board_free(&b2);
-    unlink(path);
+    cleanup(path);
 }
 
 static void test_get_card(void)

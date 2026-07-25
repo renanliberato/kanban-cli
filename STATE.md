@@ -26,6 +26,7 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] M4: e2e + polish + README
 - [x] Hand off macOS build instructions (included in README.md)
 - [x] Iteration 2: BDD test layer (behave/gherkin, 36 scenarios) replacing e2e.py
+- [x] Iteration 3 M1: SQLite storage with JSON auto-migration
 
 ## Git log so far
 - `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)

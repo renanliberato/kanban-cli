@@ -20,6 +20,7 @@ typedef struct {
 typedef struct {
     Column columns[MAX_COLUMNS];
     int next_id;
+    void *db_handle;   /* opaque db_t* from db.h, NULL when unused */
 } Board;
 
 /* lifecycle */
@@ -36,7 +37,10 @@ int  board_delete_card(Board *b, int id);
 int  board_move_card(Board *b, int id, int dest_col);
 
 /* persistence: returns 0 on success, -1 on error.
-   board_load returns an empty Board on missing or malformed file. */
+   board_load opens/creates the SQLite database at path, auto-migrating
+   from a sibling JSON file if the db doesn't exist.
+   missing/malformed files give an empty board (return 0).
+   board_save writes the full in-memory state to the database. */
 int  board_load(Board *b, const char *path);
 int  board_save(const Board *b, const char *path);
 
