@@ -26,9 +26,9 @@ vendor/cJSON.c, vendor/cJSON.h
 src/main.c          — entry, arg parsing
 src/board.c/.h      — model + JSON load/save
 src/tui.c/.h        — ncurses UI
-tests/unit/test_board.c  — tiny assert-based harness
-tests/e2e.py        — pexpect e2e driving the binary in a pty
-scripts/verify.sh   — build + unit tests + e2e (runs on box)
+tests/unit/test_board.c       — unit test harness (54 asserts)
+tests/bdd/                    — behave/gherkin BDD suite (see below)
+scripts/verify.sh             — build + unit tests + behave (runs on box)
 README.md
 ```
 
@@ -39,7 +39,25 @@ README.md
 - M3: card CRUD + move + autosave.
 - M4: pexpect e2e tests, UX polish, README with macOS build instructions.
 
+## Iteration 2 — BDD Test Layer
+
+The e2e.py pexpect suite was replaced by a full BDD test layer using
+`behave` (Python gherkin).  10 feature files cover every TUI operation in
+plain business language: startup, navigation (hjkl + arrows), card add
+(+ ESC/empty cancel), card edit (+ ESC cancel), card delete (y confirm,
+n/other cancel), card move (H/L and angle brackets with boundary no-ops),
+persistence (quit/restart), autosave (file-on-disk checks while app is
+running), quit from various states, and responsiveness at 80x24 and
+120x40.  Step definitions drive the binary via pexpect in a pty following
+the same proven patterns from the original e2e.py.
+
+- Framework: `python3-behave` installed via apt on the box.
+- Layout: `tests/bdd/features/*.feature` + `tests/bdd/steps/kanban_steps.py`
+  + `tests/bdd/environment.py`.
+- Suite size: **36 scenarios, 200 steps**, passing with zero failures.
+- `verify.sh` now runs behave instead of e2e.py (unit tests remain untouched).
+
 ## Verify-on-box loop (after EVERY commit)
-1. Sync source to box (tar over box ssh).
-2. `scripts/verify.sh` on box: clean build, unit tests, e2e tests.
+1. Sync source to box (tar over box ssh with `COPYFILE_DISABLE=1`).
+2. `scripts/verify.sh` on box: clean build, unit tests, behave.
 3. If anything fails: fix and amend the commit. Never commit red.

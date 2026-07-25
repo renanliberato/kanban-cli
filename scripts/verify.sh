@@ -16,8 +16,8 @@ echo "--- unit tests ---"
 make test
 
 echo ""
-echo "--- e2e tests ---"
-python3 tests/e2e.py ./bin/kanban
+echo "--- BDD tests ---"
+python3 -m behave tests/bdd -D binary=./bin/kanban
 
 echo ""
 echo "--- verify: all green ---"

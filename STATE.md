@@ -19,12 +19,13 @@ Read this first after any context compaction. PLAN.md has the full plan.
 ## Progress
 - [x] box CLI installed + authenticated
 - [x] PLAN.md / STATE.md written
-- [x] Box provisioned (gcc, make, libncurses-dev, python3+pexpect)
+- [x] Box provisioned (gcc, make, libncurses-dev, python3+pexpect, python3-behave)
 - [x] M1: skeleton + model + cJSON + unit tests
 - [x] M2: ncurses TUI render + navigation
 - [x] M3: CRUD + move + autosave
 - [x] M4: e2e + polish + README
 - [x] Hand off macOS build instructions (included in README.md)
+- [x] Iteration 2: BDD test layer (behave/gherkin, 36 scenarios) replacing e2e.py
 
 ## Git log so far
 - `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)
@@ -32,6 +33,7 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - `ee9da35` M2: ncurses TUI with board rendering, navigation, colors (6 files, 545+ lines)
 - `edc6b21` M3: card add/edit/delete, move between columns, autosave (6 files, 463+ lines)
 - `804f7bb` M4: e2e suite, card counters, truncation ellipses, README, macOS compat (7 files, +1034/-287 lines)
+- `915f6c3` Iteration 2: BDD test suite (behave/gherkin, 36 scenarios, 200 steps, replaces e2e.py)
 
 ## Notes for minions
 - All builds/tests/e2e MUST run on the box, not locally.
