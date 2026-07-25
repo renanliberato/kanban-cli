@@ -35,6 +35,8 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - `edc6b21` M3: card add/edit/delete, move between columns, autosave (6 files, 463+ lines)
 - `804f7bb` M4: e2e suite, card counters, truncation ellipses, README, macOS compat (7 files, +1034/-287 lines)
 - `915f6c3` Iteration 2: BDD test suite (behave/gherkin, 36 scenarios, 200 steps, replaces e2e.py)
+- `6a0135e` Add iteration 3 design doc and box usage report
+- `cad21ae` Iter3 M1: SQLite storage with JSON auto-migration (14 files, +276K/-82 lines)
 
 ## Notes for minions
 - All builds/tests/e2e MUST run on the box, not locally.
