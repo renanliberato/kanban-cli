@@ -126,6 +126,19 @@ int board_add_card(Board *b, int col, const char *title)
     return c->cards[idx].id;
 }
 
+int board_edit_card_title(Board *b, int id, const char *new_title)
+{
+    Card *card = board_get_card(b, id);
+    if (!card || !new_title) return -1;
+
+    char *title_copy = xstrdup(new_title);
+    if (!title_copy) return -1;
+
+    free(card->title);
+    card->title = title_copy;
+    return 0;
+}
+
 int board_delete_card(Board *b, int id)
 {
     int col, idx;

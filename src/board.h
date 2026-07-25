@@ -31,6 +31,7 @@ Card *board_get_card(const Board *b, int id);
 
 /* mutations */
 int  board_add_card(Board *b, int col, const char *title);
+int  board_edit_card_title(Board *b, int id, const char *new_title);
 int  board_delete_card(Board *b, int id);
 int  board_move_card(Board *b, int id, int dest_col);
 

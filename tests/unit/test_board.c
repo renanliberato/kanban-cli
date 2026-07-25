@@ -215,6 +215,29 @@ static void test_get_card(void)
     board_free(&b);
 }
 
+static void test_edit_card_title(void)
+{
+    Board b = board_new();
+    int id = board_add_card(&b, COL_TODO, "original");
+
+    int ret = board_edit_card_title(&b, id, "updated");
+    ASSERT_EQ(ret, 0, "edit_card_title returns 0 on success");
+
+    Card *c = board_get_card(&b, id);
+    ASSERT_NOTNULL(c, "card still exists after edit");
+    ASSERT_STREQ(c->title, "updated", "title updated");
+
+    /* edit non-existent card */
+    ret = board_edit_card_title(&b, 999, "nope");
+    ASSERT_EQ(ret, -1, "edit non-existent card returns -1");
+
+    /* edit with NULL title */
+    ret = board_edit_card_title(&b, id, NULL);
+    ASSERT_EQ(ret, -1, "edit with NULL title returns -1");
+
+    board_free(&b);
+}
+
 static void test_cards_distributed_across_columns(void)
 {
     Board b = board_new();
@@ -245,6 +268,7 @@ int main(void)
     test_load_missing_file();
     test_save_empty_board();
     test_get_card();
+    test_edit_card_title();
     test_cards_distributed_across_columns();
 
     printf("\n---\n%d tests: %d passed, %d failed\n",

@@ -7,8 +7,9 @@
 /* internal constants                                                 */
 /* ------------------------------------------------------------------ */
 
-#define MIN_ROWS 20
-#define MIN_COLS 60
+#define MIN_ROWS    20
+#define MIN_COLS    60
+#define INPUT_MAX   128
 
 enum { COL_TUI_TODO = 0, COL_TUI_DOING = 1, COL_TUI_DONE = 2 };
 
@@ -16,8 +17,9 @@ enum { COL_TUI_TODO = 0, COL_TUI_DOING = 1, COL_TUI_DONE = 2 };
 /* module state                                                       */
 /* ------------------------------------------------------------------ */
 
-static TuiState state;
-static int has_color = 0;
+static TuiState    state;
+static int         has_color = 0;
+static const char *g_save_path = NULL;
 
 /* color-pair ids */
 enum {
@@ -134,7 +136,7 @@ static void draw_border_line(int y, int cw)
         for (int j = 0; j < cw; j++)
             addch(ACS_HLINE);
         if (ci < 2)
-            addch(ACS_TTEE);   /* top tee: ┬ */
+            addch(ACS_TTEE);   /* top tee */
     }
     addch(ACS_URCORNER);
 }
@@ -142,14 +144,14 @@ static void draw_border_line(int y, int cw)
 static void draw_separator(int y, int cw)
 {
     move(y, 0);
-    addch(ACS_LTEE);    /* ├ */
+    addch(ACS_LTEE);    /* |- */
     for (int ci = 0; ci < 3; ci++) {
         for (int j = 0; j < cw; j++)
             addch(ACS_HLINE);
         if (ci < 2)
-            addch(ACS_PLUS);   /* ┼ */
+            addch(ACS_PLUS);   /* -|- */
     }
-    addch(ACS_RTEE);    /* ┤ */
+    addch(ACS_RTEE);    /* -| */
 }
 
 static void draw_bottom(int y, int cw)
@@ -160,7 +162,7 @@ static void draw_bottom(int y, int cw)
         for (int j = 0; j < cw; j++)
             addch(ACS_HLINE);
         if (ci < 2)
-            addch(ACS_BTEE);   /* ┴ */
+            addch(ACS_BTEE);   /* -|- (bottom) */
     }
     addch(ACS_LRCORNER);
 }
@@ -213,16 +215,18 @@ static void draw_card_row(int y, int cw, const Board *board, int row_idx)
 /* draw the status bar on the bottom row */
 static void draw_status_bar(int rows)
 {
-    const char *hint = " q quit  ·  hjkl / arrows navigate";
+    const char *hint =
+        " q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move";
     int len = (int)strlen(hint);
 
     move(rows - 1, 0);
     if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
     else           attron(A_REVERSE);
 
-    /* fill entire line */
+    /* centre the hint text on the bar */
+    int pad = COLS > len ? (COLS - len) / 2 : 0;
     for (int x = 0; x < COLS; x++) {
-        int idx = x - 1;
+        int idx = x - pad;
         if (idx >= 0 && idx < len)
             addch((unsigned char)hint[idx]);
         else
@@ -244,7 +248,7 @@ static void tui_draw(const Board *board)
     /* terminal too small */
     if (rows < MIN_ROWS || cols < MIN_COLS) {
         const char *msg = "Terminal too small. Resize to at least "
-                          "60 columns × 20 rows.";
+                          "60 columns x 20 rows.";
         int y = rows / 2;
         int x = (cols - (int)strlen(msg)) / 2;
         if (x < 0) x = 0;
@@ -299,16 +303,176 @@ static void clamp_selection(const Board *board)
 }
 
 /* ------------------------------------------------------------------ */
+/* autosave helper                                                    */
+/* ------------------------------------------------------------------ */
+
+static void autosave(const Board *board)
+{
+    if (g_save_path)
+        board_save(board, g_save_path);
+}
+
+/* ------------------------------------------------------------------ */
+/* input mode: inline text editor on the status bar                   */
+/* ------------------------------------------------------------------ */
+
+/* Draw the status bar with a prompt + input buffer.
+   Returns the column where the cursor should be placed. */
+static void draw_input_bar(const char *prompt, const char *buf, int buf_len)
+{
+    int rows = LINES;
+    int cols = COLS;
+    int plen = (int)strlen(prompt);
+
+    move(rows - 1, 0);
+    if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
+    else           attron(A_REVERSE);
+
+    int x = 0;
+    /* print prompt */
+    for (int i = 0; i < plen && x < cols; i++, x++)
+        addch((unsigned char)prompt[i]);
+    /* print buffer */
+    for (int i = 0; i < buf_len && x < cols; i++, x++)
+        addch((unsigned char)buf[i]);
+    /* fill rest of line */
+    for (; x < cols; x++)
+        addch(' ');
+
+    if (has_color) attroff(COLOR_PAIR(PAIR_STATUSBAR));
+    else           attroff(A_REVERSE);
+}
+
+/*
+ * Run an inline text-editing loop on the status bar.
+ * Prompt is shown left-justified.
+ * The buffer is pre-filled with `initial`.
+ * Returns 0 if confirmed (Enter), -1 if cancelled (ESC).
+ * On confirm, `buf` contains the entered text (may be empty).
+ */
+static int input_line(const char *prompt, char *buf, size_t bufsz,
+                      const char *initial)
+{
+    size_t initial_len = initial ? strlen(initial) : 0;
+    if (initial_len >= bufsz) initial_len = bufsz - 1;
+    memcpy(buf, initial, initial_len);
+    buf[initial_len] = '\0';
+    int len = (int)initial_len;
+
+    int prompt_len = (int)strlen(prompt);
+
+    curs_set(1);  /* show cursor */
+
+    int rows = LINES;
+
+    while (1) {
+        draw_input_bar(prompt, buf, len);
+        /* place cursor after the typed text */
+        move(rows - 1, prompt_len + len);
+        refresh();
+
+        int ch = getch();
+
+        /* esc cancels */
+        if (ch == 27) {
+            curs_set(0);
+            return -1;
+        }
+        /* enter confirms (including empty => cancel semantics handled by caller) */
+        if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
+            curs_set(0);
+            return 0;
+        }
+        /* backspace */
+        if (ch == KEY_BACKSPACE || ch == 127 || ch == '\b') {
+            if (len > 0)
+                buf[--len] = '\0';
+            continue;
+        }
+        /* terminal resize */
+        if (ch == KEY_RESIZE) {
+            rows = LINES;
+            continue;
+        }
+        /* printable ASCII */
+        if (ch >= 32 && ch <= 126 && len < (int)bufsz - 1) {
+            buf[len++] = (char)ch;
+            buf[len]   = '\0';
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* confirm mode: y/n prompt on the status bar                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Show a prompt on the status bar and wait for y/n/ESC.
+ * Returns 1 if confirmed (y), 0 otherwise (n or ESC).
+ */
+static int confirm(const char *prompt)
+{
+    int rows = LINES;
+    int cols = COLS;
+    int plen = (int)strlen(prompt);
+
+    /* draw prompt */
+    move(rows - 1, 0);
+    if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
+    else           attron(A_REVERSE);
+
+    for (int i = 0; i < plen && i < cols; i++)
+        addch((unsigned char)prompt[i]);
+    for (int i = plen; i < cols; i++)
+        addch(' ');
+
+    if (has_color) attroff(COLOR_PAIR(PAIR_STATUSBAR));
+    else           attroff(A_REVERSE);
+
+    refresh();
+
+    while (1) {
+        int ch = getch();
+        if (ch == 'y' || ch == 'Y') return 1;
+        if (ch == 'n' || ch == 'N' || ch == 27) return 0;
+        if (ch == KEY_RESIZE) {
+            rows = LINES;
+            cols = COLS;
+            /* redraw prompt */
+            plen = (int)strlen(prompt);
+            move(rows - 1, 0);
+            if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
+            else           attron(A_REVERSE);
+            for (int i = 0; i < plen && i < cols; i++)
+                addch((unsigned char)prompt[i]);
+            for (int i = plen; i < cols; i++)
+                addch(' ');
+            if (has_color) attroff(COLOR_PAIR(PAIR_STATUSBAR));
+            else           attroff(A_REVERSE);
+            refresh();
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* event handling                                                     */
 /* ------------------------------------------------------------------ */
 
-static int handle_input(const Board *board, int ch)
+/*
+ * Handle a single keypress.
+ * Returns 0 to signal the main loop to exit, 1 to continue.
+ * Mutations are saved immediately via autosave().
+ */
+static int handle_input(Board *board, int ch)
 {
     switch (ch) {
+
+    /* ---- quit ---- */
     case 'q':
     case 'Q':
-        return 0;   /* signal loop to exit */
+        return 0;
 
+    /* ---- navigation ---- */
     case 'h':
     case KEY_LEFT:
         if (state.sel_col > 0)
@@ -326,11 +490,8 @@ static int handle_input(const Board *board, int ch)
     case 'j':
     case KEY_DOWN: {
         const Column *col = &board->columns[state.sel_col];
-        if (col->count > 0) {
-            if (state.sel_card < col->count - 1)
-                state.sel_card++;
-            /* else at bottom — stay put */
-        }
+        if (col->count > 0 && state.sel_card < col->count - 1)
+            state.sel_card++;
         return 1;
     }
 
@@ -338,11 +499,86 @@ static int handle_input(const Board *board, int ch)
     case KEY_UP:
         if (state.sel_card > 0)
             state.sel_card--;
-        /* else at top — stay put */
         return 1;
 
     case KEY_RESIZE:
-        /* handled by redrawing — nothing else needed */
+        return 1;   /* handled by redrawing */
+
+    /* ---- add card ---- */
+    case 'a': {
+        char buf[INPUT_MAX + 1] = "";
+        if (input_line("Add card: ", buf, sizeof(buf), "") == 0
+            && buf[0] != '\0') {
+            int new_id = board_add_card(board, state.sel_col, buf);
+            if (new_id > 0) {
+                state.sel_card =
+                    board->columns[state.sel_col].count - 1;
+                autosave(board);
+            }
+        }
+        return 1;
+    }
+
+    /* ---- edit card ---- */
+    case 'e': {
+        const Column *col = &board->columns[state.sel_col];
+        if (state.sel_card >= 0 && state.sel_card < col->count) {
+            char buf[INPUT_MAX + 1] = "";
+            const char *old_title = col->cards[state.sel_card].title;
+            int card_id = col->cards[state.sel_card].id;
+            if (input_line("Edit card: ", buf, sizeof(buf), old_title) == 0
+                && buf[0] != '\0') {
+                board_edit_card_title(board, card_id, buf);
+                autosave(board);
+            }
+        }
+        return 1;
+    }
+
+    /* ---- delete card ---- */
+    case 'd': {
+        const Column *col = &board->columns[state.sel_col];
+        if (state.sel_card >= 0 && state.sel_card < col->count) {
+            if (confirm("Delete card? (y/n) ")) {
+                int card_id = col->cards[state.sel_card].id;
+                board_delete_card(board, card_id);
+                clamp_selection(board);
+                autosave(board);
+            }
+        }
+        return 1;
+    }
+
+    /* ---- move card left (shift-h or <) ---- */
+    case 'H':
+    case '<':
+        if (state.sel_card >= 0 && state.sel_col > 0) {
+            int card_id =
+                board->columns[state.sel_col]
+                    .cards[state.sel_card].id;
+            int dest = state.sel_col - 1;
+            if (board_move_card(board, card_id, dest) == 0) {
+                state.sel_col  = dest;
+                state.sel_card = board->columns[dest].count - 1;
+                autosave(board);
+            }
+        }
+        return 1;
+
+    /* ---- move card right (shift-l or >) ---- */
+    case 'L':
+    case '>':
+        if (state.sel_card >= 0 && state.sel_col < 2) {
+            int card_id =
+                board->columns[state.sel_col]
+                    .cards[state.sel_card].id;
+            int dest = state.sel_col + 1;
+            if (board_move_card(board, card_id, dest) == 0) {
+                state.sel_col  = dest;
+                state.sel_card = board->columns[dest].count - 1;
+                autosave(board);
+            }
+        }
         return 1;
 
     default:
@@ -357,6 +593,8 @@ static int handle_input(const Board *board, int ch)
 int tui_run(Board *board, const char *save_path)
 {
     if (!board) return -1;
+
+    g_save_path = save_path;
 
     state.sel_col  = 0;
     state.sel_card = board->columns[0].count > 0 ? 0 : -1;
@@ -374,7 +612,7 @@ int tui_run(Board *board, const char *save_path)
 
     tui_shutdown();
 
-    /* save board on exit */
+    /* final save on exit */
     if (save_path)
         board_save(board, save_path);
 

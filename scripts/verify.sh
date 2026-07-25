@@ -20,4 +20,8 @@ echo "--- TUI smoke test ---"
 python3 tests/smoke_tui.py ./bin/kanban
 
 echo ""
+echo "--- CRUD smoke test ---"
+python3 tests/smoke_crud.py ./bin/kanban
+
+echo ""
 echo "--- verify: all green ---"
