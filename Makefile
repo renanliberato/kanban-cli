@@ -14,24 +14,28 @@ BUILDDIR = build
 TARGET     = $(BINDIR)/kanban
 TESTBIN    = $(BINDIR)/test_board
 TESTDBBIN  = $(BINDIR)/test_db
+TESTLLMBIN = $(BINDIR)/test_llm
 
-SRCS       = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/tui.c \
+SRCS       = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/tui.c $(SRCDIR)/llm.c \
              $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
 TESTSRCS   = $(TESTDIR)/test_board.c $(SRCDIR)/board.c $(SRCDIR)/db.c \
              $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
 TESTDBSRCS = $(TESTDIR)/test_db.c $(SRCDIR)/db.c $(VENDOR)/sqlite3.c
+TESTLLMSRCS = $(TESTDIR)/test_llm.c $(SRCDIR)/llm.c
 
 OBJS       = $(patsubst %.c,$(BUILDDIR)/%.o,$(SRCS))
 TESTOBJS   = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTSRCS))
 TESTDBOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTDBSRCS))
+TESTLLMOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTLLMSRCS))
 
 .PHONY: all test clean
 
 all: $(TARGET)
 
-test: $(TESTBIN) $(TESTDBBIN)
+test: $(TESTBIN) $(TESTDBBIN) $(TESTLLMBIN)
 	./$(TESTBIN)
 	./$(TESTDBBIN)
+	./$(TESTLLMBIN)
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lncurses
@@ -40,6 +44,9 @@ $(TESTBIN): $(TESTOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(TESTDBBIN): $(TESTDBOBJS) | $(BINDIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(TESTLLMBIN): $(TESTLLMOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BINDIR):

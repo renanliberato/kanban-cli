@@ -27,6 +27,7 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] Hand off macOS build instructions (included in README.md)
 - [x] Iteration 2: BDD test layer (behave/gherkin, 36 scenarios) replacing e2e.py
 - [x] Iteration 3 M1: SQLite storage with JSON auto-migration
+- [x] Iteration 3 M2: LLM job subsystem with fork/poll provider seam + non-blocking TUI loop
 
 ## Git log so far
 - `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)
@@ -37,6 +38,7 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - `915f6c3` Iteration 2: BDD test suite (behave/gherkin, 36 scenarios, 200 steps, replaces e2e.py)
 - `6a0135e` Add iteration 3 design doc and box usage report
 - `cad21ae` Iter3 M1: SQLite storage with JSON auto-migration (14 files, +276K/-82 lines)
+- `ea79908` Iter3 M2: LLM job subsystem with fork/poll provider seam + non-blocking TUI loop (12 files, +1412/-26 lines)
 
 ## Notes for minions
 - All builds/tests/e2e MUST run on the box, not locally.

@@ -39,6 +39,11 @@ def spawn_kanban(context, board_path=None, dimensions=(30, 90)):
     # Do NOT override HOME — ncurses may need it for terminfo/configuration.
     # The board path is always passed as a command-line argument.
 
+    # Use the fake LLM provider so that BDD tests work without opencode.
+    # The fake provider completes in-process after N poll() calls (no fork).
+    env.setdefault("KANBAN_LLM_PROVIDER", "fake")
+    env.setdefault("KANBAN_LLM_FAKE_DELAY", "10")
+
     child = pexpect.spawn(
         _binary_path(context),
         args=[board_path],

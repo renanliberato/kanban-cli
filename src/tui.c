@@ -1,15 +1,18 @@
 #include "tui.h"
+#include "llm.h"
 #include <ncurses.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ------------------------------------------------------------------ */
 /* internal constants                                                 */
 /* ------------------------------------------------------------------ */
 
-#define MIN_ROWS    20
-#define MIN_COLS    60
-#define INPUT_MAX   128
+#define MIN_ROWS        20
+#define MIN_COLS        60
+#define INPUT_MAX       128
+#define FLASH_DURATION   2    /* seconds flash message stays visible */
 
 enum { COL_TUI_TODO = 0, COL_TUI_DOING = 1, COL_TUI_DONE = 2 };
 
@@ -20,6 +23,14 @@ enum { COL_TUI_TODO = 0, COL_TUI_DOING = 1, COL_TUI_DONE = 2 };
 static TuiState    state;
 static int         has_color = 0;
 static const char *g_save_path = NULL;
+
+/* flash message: shown briefly in the status bar after an event */
+static char   g_flash_buf[128];
+static time_t g_flash_until = 0;
+
+/* spinner state for job-activity indicator */
+static int    g_spinner_idx = 0;
+static const char g_spinner_chars[] = "|/-\\";
 
 /* color-pair ids */
 enum {
@@ -244,22 +255,73 @@ static void draw_card_row(int y, int cw, const Board *board, int row_idx)
 /* draw the status bar on the bottom row */
 static void draw_status_bar(int rows)
 {
-    const char *hint =
-        " q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move";
-    int len = (int)strlen(hint);
-
     move(rows - 1, 0);
     if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
     else           attron(A_REVERSE);
 
-    /* centre the hint text on the bar */
-    int pad = COLS > len ? (COLS - len) / 2 : 0;
-    for (int x = 0; x < COLS; x++) {
-        int idx = x - pad;
-        if (idx >= 0 && idx < len)
-            addch((unsigned char)hint[idx]);
-        else
+    int x = 0;
+    int cols = COLS;
+
+    /* Flash message takes priority */
+    if (g_flash_until && time(NULL) < g_flash_until) {
+        int flen = (int)strlen(g_flash_buf);
+        /* Left-align the flash message with a leading space */
+        addch(' '); x++;
+        for (int i = 0; i < flen && x < cols; i++, x++)
+            addch((unsigned char)g_flash_buf[i]);
+        for (; x < cols; x++)
             addch(' ');
+    } else {
+        /* Build the status line: job indicator + hint */
+        int job_count = llm_job_count();
+        int running_count = 0;
+        for (int i = 0; i < job_count; i++) {
+            const LlmJob *j = llm_job_at(i);
+            if (j && j->state == LLM_RUNNING)
+                running_count++;
+        }
+
+        char left[64] = "";
+        int left_len = 0;
+        if (running_count > 0) {
+            /* Show spinner + count, e.g. "| 1 job " */
+            char sp = g_spinner_chars[g_spinner_idx % 4];
+            left_len = snprintf(left, sizeof(left),
+                                " %c %d job%s running  ",
+                                sp, running_count,
+                                running_count == 1 ? "" : "s");
+        }
+
+        const char *hint =
+            "q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move  T test";
+        int hint_len = (int)strlen(hint);
+
+        /* Layout: left part (job status) + centred hint.
+           If left part is too wide, truncate the hint. */
+        int available = cols - left_len;
+        if (available < 10) {
+            /* Not enough room — just fill with spaces */
+            for (int i = 0; i < left_len && x < cols; i++, x++)
+                addch((unsigned char)left[i]);
+            for (; x < cols; x++)
+                addch(' ');
+        } else {
+            /* Print left part */
+            for (int i = 0; i < left_len && x < cols; i++, x++)
+                addch((unsigned char)left[i]);
+
+            /* Centre the hint in remaining space */
+            int hint_pad = available > hint_len
+                           ? (available - hint_len) / 2 : 0;
+            for (int i = 0; i < hint_pad && x < cols; i++, x++)
+                addch(' ');
+
+            for (int i = 0; i < hint_len && x < cols; i++, x++)
+                addch((unsigned char)hint[i]);
+
+            for (; x < cols; x++)
+                addch(' ');
+        }
     }
 
     if (has_color) attroff(COLOR_PAIR(PAIR_STATUSBAR));
@@ -402,6 +464,10 @@ static int input_line(const char *prompt, char *buf, size_t bufsz,
 
         int ch = getch();
 
+        /* timeout / no input — just redraw */
+        if (ch == ERR)
+            continue;
+
         /* esc cancels */
         if (ch == 27) {
             curs_set(0);
@@ -462,6 +528,8 @@ static int confirm(const char *prompt)
 
     while (1) {
         int ch = getch();
+        if (ch == ERR)
+            continue;
         if (ch == 'y' || ch == 'Y') return 1;
         if (ch == 'n' || ch == 'N' || ch == 27) return 0;
         if (ch == KEY_RESIZE) {
@@ -610,6 +678,21 @@ static int handle_input(Board *board, int ch)
         }
         return 1;
 
+    /* ---- dev-only test key: submit a fake LLM job (M6 removal) ---- */
+    /* Press 'T' to submit a fake LLM job for the currently selected
+       card.  This exercises the full job lifecycle end to end and is
+       wired to the fake provider so it works on the CI box without
+       opencode installed.  The card's title is sent as the prompt. */
+    case 'T':
+        if (state.sel_card >= 0) {
+            const Column *col = &board->columns[state.sel_col];
+            int card_id = col->cards[state.sel_card].id;
+            const char *title = col->cards[state.sel_card].title;
+            (void)llm_submit(title, card_id, 30);
+            /* No flash on submit — the status-bar spinner shows activity. */
+        }
+        return 1;
+
     default:
         return 1;   /* ignore unknown keys */
     }
@@ -628,16 +711,90 @@ int tui_run(Board *board, const char *save_path)
     state.sel_col  = 0;
     state.sel_card = board->columns[0].count > 0 ? 0 : -1;
 
-    tui_init();
-    tui_draw(board);
+    /* flash message helper – sets the flash bar for `duration` seconds */
+    #define SET_FLASH(fmt, ...) do { \
+        snprintf(g_flash_buf, sizeof(g_flash_buf), fmt, ##__VA_ARGS__); \
+        g_flash_until = time(NULL) + FLASH_DURATION; \
+    } while(0)
 
-    int running = 1;
+    tui_init();
+
+    /* Non-blocking poll loop: timeout(100) means getch() returns ERR
+       after 100ms of no input.  This lets us poll LLM jobs and spin
+       the activity spinner without freezing the TUI. */
+    timeout(100);           /* getch() returns ERR after 100ms */
+
+    tui_draw(board);        /* initial draw */
+
+    int running  = 1;
+    int dirty    = 0;
+    int prev_job_count = llm_job_count();
+
     while (running) {
         int ch = getch();
-        running = handle_input(board, ch);
-        if (running)
+
+        if (ch != ERR) {
+            running = handle_input(board, ch);
+            dirty   = 1;
+        }
+
+        /* Poll LLM jobs — non-blocking */
+        int transitions = llm_poll();
+        if (transitions > 0) {
+            /* Check what transitioned and flash a brief note */
+            int job_count = llm_job_count();
+            for (int i = 0; i < job_count; i++) {
+                const LlmJob *j = llm_job_at(i);
+                if (!j) continue;
+                if (j->state == LLM_DONE) {
+                    SET_FLASH("Job #%d done (card #%d)",
+                              j->id, j->card_id);
+                } else if (j->state == LLM_FAILED) {
+                    SET_FLASH("Job #%d failed", j->id);
+                } else if (j->state == LLM_CANCELLED) {
+                    SET_FLASH("Job #%d cancelled", j->id);
+                }
+            }
+            dirty = 1;
+        }
+
+        /* Advance spinner if jobs are running */
+        {
+            int running_count = 0;
+            int job_count = llm_job_count();
+            for (int i = 0; i < job_count; i++) {
+                const LlmJob *j = llm_job_at(i);
+                if (j && j->state == LLM_RUNNING)
+                    running_count++;
+            }
+            if (running_count > 0) {
+                g_spinner_idx++;
+                dirty = 1;
+            }
+        }
+
+        /* Detect job count change for dirty flag */
+        {
+            int cur = llm_job_count();
+            if (cur != prev_job_count) {
+                dirty = 1;
+                prev_job_count = cur;
+            }
+        }
+
+        /* Expire flash message */
+        if (g_flash_until && time(NULL) >= g_flash_until) {
+            g_flash_until = 0;
+            dirty = 1;
+        }
+
+        if (dirty) {
             tui_draw(board);
+            dirty = 0;
+        }
     }
+
+    #undef SET_FLASH
 
     tui_shutdown();
 

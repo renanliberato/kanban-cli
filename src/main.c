@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "board.h"
 #include "tui.h"
+#include "llm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,8 +48,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    llm_init();
+
     int ret = tui_run(&b, path);
 
+    llm_free();
     board_free(&b);
     free(allocated_path);
     return ret;

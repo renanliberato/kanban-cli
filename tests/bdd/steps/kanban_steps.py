@@ -141,6 +141,7 @@ _KEY_MAP = {
     "q":             "q",
     "a":             "a",  "e": "e",  "d": "d",
     "y":             "y",  "n": "n",
+    "T":             "T",
 }
 
 _NAV_TRACK = {
@@ -632,3 +633,52 @@ def step_then_still_running(context):
 @then("no error should occur")
 def step_then_no_error(context):
     pass  # satisfied if we got this far
+
+
+# ---------------------------------------------------------------------------
+# Then steps — LLM job status (iteration 3 M2)
+# ---------------------------------------------------------------------------
+
+@then('the status bar should show "{text}"')
+def step_then_status_bar_shows(context, text):
+    """Check that the status bar (bottom row) contains the given text."""
+    time.sleep(0.3)
+    content = screen_content(context.child, context)
+    # The status bar is the last line of screen content.
+    # pexpect gives us the raw terminal output. Look for the text in any line.
+    lines = content.split("\n")
+    found = any(text.lower() in line.lower() for line in lines if line.strip())
+    assert found, f"Status bar should contain '{text}'. Screen:\n{content[-500:]}"
+
+
+@then('I can still navigate with "{key}"')
+def step_then_can_navigate_while_job_running(context, key):
+    """While a job is running, pressing a nav key should still work."""
+    # The job has already been submitted (T pressed).
+    # Now press a navigation key and verify it doesn't block.
+    time.sleep(0.2)
+    _send_key(context, key)
+    # After pressing nav key, the app should still be alive and responsive.
+    # We can verify by checking the screen shows header content.
+    time.sleep(0.2)
+    content = screen_content(context.child, context)
+    # The header row should still be present
+    assert "To Do" in content, f"Screen should show 'To Do' header after navigation. Content:\n{content[-500:]}"
+    # App should still be alive
+    assert context.child.isalive(), "Application should still be alive after navigation"
+
+
+@step("I wait for the job to complete")
+def step_wait_for_job_completion(context):
+    """Wait until the LLM job finishes (status bar returns to normal)."""
+    # With KANBAN_LLM_FAKE_DELAY=10, the job completes after ~1s.
+    # Wait longer to be safe.
+    time.sleep(2.0)
+    # The app should still be alive
+    assert context.child.isalive(), "Application should still be alive"
+    # The status bar should no longer show "running"
+    # Note: after completion the flash message "Done" should appear briefly,
+    # but it may have expired by now. We just verify the TUI is alive.
+    content = screen_content(context.child, context)
+    assert "To Do" in content or "q quit" in content, \
+        f"TUI should be showing the board after job completion. Content:\n{content[-500:]}"

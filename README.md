@@ -59,9 +59,27 @@ make
 
 ## Development
 
-- **Unit tests**: `make test` — builds and runs 95 unit tests (56 board model + 39 SQLite persistence).
+- **Unit tests**: `make test` — builds and runs 95 unit tests (56 board model + 39 SQLite persistence) plus LLM job tests.
 - **Full verification**: `bash scripts/verify.sh` — clean build, unit tests, and 36 BDD scenarios via behave/pexpect.
 - **E2E tests only**: `python3 tests/e2e.py ./bin/kanban`
+
+### LLM Provider
+
+The LLM subsystem uses a provider pattern. The provider is selected via the
+`KANBAN_LLM_PROVIDER` environment variable:
+
+- `opencode` (default): forks `opencode run --format json --dir . <prompt>`.
+  Requires the `opencode` CLI on PATH.
+- `fake`: in-process fake provider for testing. Completes after N `llm_poll()`
+  calls. Configure the delay with `KANBAN_LLM_FAKE_DELAY` (default 1).
+
+Example:
+```
+KANBAN_LLM_PROVIDER=fake KANBAN_LLM_FAKE_DELAY=5 ./bin/kanban
+```
+
+The debug key `T` (Shift+T) submits a fake LLM job for the selected card to
+exercise the job lifecycle. This key is dev-only and will be removed in M6.
 
 ### Project Layout
 
@@ -69,11 +87,12 @@ make
 Makefile                  — build (gcc, C99, ncurses); SQLite compiled separately
 vendor/cJSON.c, .h        — vendored JSON library
 vendor/sqlite3.c, .h      — vendored SQLite amalgamation (v3.49.1)
-src/
-  main.c                  — entry point, arg parsing, ESCDELAY setup
-  board.c, .h             — board model: add/edit/delete/move cards, SQLite persistence
-  db.c, .h                — SQLite persistence layer (schema v1, WAL, migrations)
-  tui.c, .h               — ncurses TUI: render, navigation, input, status bar
+  src/
+    main.c                  — entry point, arg parsing, ESCDELAY setup
+    board.c, .h             — board model: add/edit/delete/move cards, SQLite persistence
+    db.c, .h                — SQLite persistence layer (schema v1, WAL, migrations)
+    llm.c, .h               — LLM job subsystem (fork+exec+pipe, fake provider for testing)
+    tui.c, .h               — ncurses TUI: render, navigation, input, status bar
 tests/
   unit/test_board.c       — board model unit tests (56 assertions)
   unit/test_db.c           — SQLite persistence unit tests (39 assertions)
