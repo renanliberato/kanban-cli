@@ -16,4 +16,8 @@ echo "--- unit tests ---"
 make test
 
 echo ""
+echo "--- TUI smoke test ---"
+python3 tests/smoke_tui.py ./bin/kanban
+
+echo ""
 echo "--- verify: all green ---"

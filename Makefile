@@ -11,7 +11,7 @@ BUILDDIR = build
 TARGET   = $(BINDIR)/kanban
 TESTBIN  = $(BINDIR)/test_board
 
-SRCS     = $(SRCDIR)/main.c $(SRCDIR)/board.c $(VENDOR)/cJSON.c
+SRCS     = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/tui.c $(VENDOR)/cJSON.c
 TESTSRCS = $(TESTDIR)/test_board.c $(SRCDIR)/board.c $(VENDOR)/cJSON.c
 
 OBJS     = $(patsubst %.c,$(BUILDDIR)/%.o,$(SRCS))
@@ -25,7 +25,7 @@ test: $(TESTBIN)
 	./$(TESTBIN)
 
 $(TARGET): $(OBJS) | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lncurses
 
 $(TESTBIN): $(TESTOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
