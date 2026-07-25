@@ -20,14 +20,14 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] box CLI installed + authenticated
 - [x] PLAN.md / STATE.md written
 - [x] Box provisioned (gcc, make, libncurses-dev, python3+pexpect)
-- [ ] M1: skeleton + model + cJSON + unit tests
+- [x] M1: skeleton + model + cJSON + unit tests
 - [ ] M2: ncurses TUI render + navigation
 - [ ] M3: CRUD + move + autosave
 - [ ] M4: e2e + polish + README
 - [ ] Hand off macOS build instructions
 
 ## Git log so far
-- (empty repo)
+- `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)
 
 ## Notes for minions
 - All builds/tests/e2e MUST run on the box, not locally.
