@@ -23,14 +23,15 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] M1: skeleton + model + cJSON + unit tests
 - [x] M2: ncurses TUI render + navigation
 - [x] M3: CRUD + move + autosave
-- [ ] M4: e2e + polish + README
-- [ ] Hand off macOS build instructions
+- [x] M4: e2e + polish + README
+- [x] Hand off macOS build instructions (included in README.md)
 
 ## Git log so far
 - `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)
 - `8013042` Update STATE.md: M1 checked off, box provisioned
 - `ee9da35` M2: ncurses TUI with board rendering, navigation, colors (6 files, 545+ lines)
-- `efa8af4` M3: card add/edit/delete, move between columns, autosave (6 files, 463+ lines)
+- `edc6b21` M3: card add/edit/delete, move between columns, autosave (6 files, 463+ lines)
+- `804f7bb` M4: e2e suite, card counters, truncation ellipses, README, macOS compat (7 files, +1034/-287 lines)
 
 ## Notes for minions
 - All builds/tests/e2e MUST run on the box, not locally.

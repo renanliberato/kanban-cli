@@ -62,12 +62,23 @@ static int draw_centered(int y, int x, const char *str, int width)
     return width;
 }
 
+/* Build a header string like "To Do (3)". Returns a static buffer. */
+static const char *make_header(const char *name, int count)
+{
+    static char buf[64];
+    int n = snprintf(buf, sizeof(buf), "%s (%d)", name, count);
+    if (n < 0) return name;
+    return buf;
+}
+
 /* draw a card title truncated to fit `width` characters.
+   If the title is too long, show an ellipsis (…) at the end.
    If `selected` is non-zero the text is rendered in reverse video. */
 static void draw_card(int y, int x, const char *title, int width, int selected)
 {
     if (!title) title = "";
     int len = (int)strlen(title);
+    int usable = width - 1;   /* first char is a leading space */
 
     move(y, x);
     if (selected && has_color)
@@ -76,11 +87,27 @@ static void draw_card(int y, int x, const char *title, int width, int selected)
         attron(A_REVERSE);
 
     addch(' ');
-    for (int i = 0; i < width - 1 && i < len; i++)
-        addch((unsigned char)title[i]);
-    /* fill rest with spaces */
-    for (int i = len + 1; i < width; i++)
-        addch(' ');
+
+    if (len <= usable) {
+        /* full title fits */
+        for (int i = 0; i < len; i++)
+            addch((unsigned char)title[i]);
+        /* fill rest with spaces */
+        for (int i = len + 1; i < width; i++)
+            addch(' ');
+    } else {
+        /* truncate with ellipsis: "…" is 3 bytes in UTF-8, but
+           we display it as '…' (single wide char in ncurses with
+           UTF-8 locales, or as '.' fallback). */
+        int show = usable - 1;   /* reserve last column for ellipsis */
+        if (show < 0) show = 0;
+        for (int i = 0; i < show; i++)
+            addch((unsigned char)title[i]);
+        /* Add ellipsis character. In a UTF-8 locale ncurses handles
+           the multi-byte char; in a C locale it shows as replacement.
+           We use '~' as a portable fallback that renders everywhere. */
+        addch('~');
+    }
 
     if (selected) {
         if (has_color)
@@ -101,7 +128,7 @@ static void tui_init(void)
     noecho();
     keypad(stdscr, TRUE);
     curs_set(0);          /* hide hardware cursor */
-    set_escdelay(25);     /* quick ESC response  */
+    /* ESCDELAY is set via setenv() in main.c before initscr */
 
     if (has_colors()) {
         start_color();
@@ -168,7 +195,7 @@ static void draw_bottom(int y, int cw)
 }
 
 /* draw the three column headers (row y, just after top border) */
-static void draw_headers(int y, int cw)
+static void draw_headers(int y, int cw, const Board *board)
 {
     int x = 0;
     move(y, x++);
@@ -179,7 +206,9 @@ static void draw_headers(int y, int cw)
         if (has_color) attron(COLOR_PAIR(pair));
         else           attron(A_BOLD);
 
-        draw_centered(y, x, column_names[ci], cw);
+        const char *label = make_header(column_names[ci],
+                                        board->columns[ci].count);
+        draw_centered(y, x, label, cw);
         x += cw;
 
         if (has_color) attroff(COLOR_PAIR(pair));
@@ -259,7 +288,7 @@ static void tui_draw(const Board *board)
     int cw = col_width(cols);
 
     draw_border_line(0, cw);                    /* row 0: top border    */
-    draw_headers(1, cw);                        /* row 1: headers       */
+    draw_headers(1, cw, board);                 /* row 1: headers       */
     draw_separator(2, cw);                      /* row 2: separator     */
 
     /* card area: rows 3 .. rows-3 (leaving bottom border + status bar) */

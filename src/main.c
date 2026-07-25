@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "board.h"
 #include "tui.h"
 
@@ -29,6 +30,11 @@ int main(int argc, char **argv)
         allocated_path = default_board_path();
         path = allocated_path;
     }
+
+    /* Set ESC delay to 50ms for responsive ESC key while allowing
+       arrow-key sequences to be recognised (portable: ncurses reads
+       this env var during initscr). */
+    setenv("ESCDELAY", "50", 1);
 
     Board b = board_new();
     if (board_load(&b, path) != 0) {
