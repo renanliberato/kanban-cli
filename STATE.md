@@ -44,7 +44,8 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - `6a0135e` Add iteration 3 design doc and box usage report
 - `cad21ae` Iter3 M1: SQLite storage with JSON auto-migration (14 files, +276K/-82 lines)
 - `5de7547` Iter3 M3: CLI subcommands + AI enrich with human review
-- `2f58d86` Iter3 M4: card detail view, label picker, fuzzy filter (17 files, +2358/-196 lines)
+- `2f58d86` Iter3 M4: card detail view, label picker, fuzzy filter
+- `2eecd9e` Iter3 M5: adaptive narrow layout, undo, archive (17 files, +2358/-196 lines)
 
 ## Notes for minions
 - All builds/tests/e2e MUST run on the box, not locally.
