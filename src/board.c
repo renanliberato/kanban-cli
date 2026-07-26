@@ -339,6 +339,97 @@ int board_remove_label(Board *b, int id, const char *label)
 }
 
 /* ------------------------------------------------------------------ */
+/* labels helpers                                                     */
+/* ------------------------------------------------------------------ */
+
+int board_get_all_labels(Board *b, char ***names_out, int *count_out)
+{
+    if (!b || !names_out || !count_out) return -1;
+
+    if (b->db_handle)
+        return db_get_all_labels((db_t *)b->db_handle, names_out, count_out);
+
+    /* no db handle — collect from in-memory cards */
+    *names_out = NULL;
+    *count_out = 0;
+
+    int total = 0;
+    for (int ci = 0; ci < MAX_COLUMNS; ci++) {
+        for (int i = 0; i < b->columns[ci].count; i++)
+            total += b->columns[ci].cards[i].label_count;
+    }
+
+    if (total == 0) return 0;
+
+    char **names = malloc((size_t)(total + 1) * sizeof(char *));
+    if (!names) return -1;
+
+    int n = 0;
+    for (int ci = 0; ci < MAX_COLUMNS; ci++) {
+        for (int i = 0; i < b->columns[ci].count; i++) {
+            Card *card = &b->columns[ci].cards[i];
+            for (int li = 0; li < card->label_count; li++) {
+                if (!card->labels[li]) continue;
+                /* check for duplicates */
+                int dup = 0;
+                for (int j = 0; j < n; j++) {
+                    if (strcmp(names[j], card->labels[li]) == 0) {
+                        dup = 1;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    names[n] = xstrdup(card->labels[li]);
+                    if (!names[n]) {
+                        for (int j = 0; j < n; j++) free(names[j]);
+                        free(names);
+                        return -1;
+                    }
+                    n++;
+                }
+            }
+        }
+    }
+
+    names[n] = NULL;
+    *names_out = names;
+    *count_out = n;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* fuzzy_match: case-insensitive subsequence matching                 */
+/* ------------------------------------------------------------------ */
+
+int fuzzy_match(const char *pattern, int nstrings, const char **strings)
+{
+    if (!pattern || !pattern[0]) return 1;  /* empty pattern matches everything */
+    if (!strings || nstrings == 0) return 0;
+
+    /* For each input string, check if pattern chars appear as a subsequence
+       (case-insensitive). */
+    for (int s = 0; s < nstrings; s++) {
+        const char *str = strings[s];
+        if (!str) continue;
+
+        const char *p = pattern;
+        const char *t = str;
+        while (*p && *t) {
+            /* case-insensitive char comparison */
+            char pc = *p;
+            char tc = *t;
+            if (pc >= 'A' && pc <= 'Z') pc = (char)(pc + ('a' - 'A'));
+            if (tc >= 'A' && tc <= 'Z') tc = (char)(tc + ('a' - 'A'));
+            if (pc == tc) p++;
+            t++;
+        }
+        if (!*p) return 1;  /* found full subsequence */
+    }
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Load board from SQLite via db.c                                    */
 /* ------------------------------------------------------------------ */
 

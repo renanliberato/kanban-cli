@@ -47,6 +47,15 @@ int  board_set_card_description(Board *b, int id, const char *desc);
 int  board_add_label(Board *b, int id, const char *label);
 int  board_remove_label(Board *b, int id, const char *label);
 
+/* labels: get all labels across the board (from db) */
+int  board_get_all_labels(Board *b, char ***names_out, int *count_out);
+
+/* fuzzy match: case-insensitive subsequence match.
+   Returns 1 if `pattern` is a subsequence of any of the strings,
+   or if `pattern` is empty (match everything).
+   Returns 0 otherwise. */
+int  fuzzy_match(const char *pattern, int nstrings, const char **strings);
+
 /* persistence: returns 0 on success, -1 on error.
    board_load opens/creates the SQLite database at path, auto-migrating
    from a sibling JSON file if the db doesn't exist.

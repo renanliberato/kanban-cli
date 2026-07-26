@@ -305,6 +305,117 @@ static void test_cards_distributed_across_columns(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* fuzzy match tests                                                   */
+/* ------------------------------------------------------------------ */
+
+static void test_fuzzy_match_exact(void)
+{
+    const char *strings[] = {"hello", "world"};
+    ASSERT_EQ(fuzzy_match("hello", 2, strings), 1, "fuzzy: exact match");
+}
+
+static void test_fuzzy_match_case_insensitive(void)
+{
+    const char *strings[] = {"Hello", "WORLD"};
+    ASSERT_EQ(fuzzy_match("hello", 2, strings), 1, "fuzzy: case-insensitive match");
+    ASSERT_EQ(fuzzy_match("WORLD", 2, strings), 1, "fuzzy: case-insensitive uppercase vs lowercase");
+}
+
+static void test_fuzzy_match_subsequence(void)
+{
+    const char *strings[] = {"implement login feature"};
+    ASSERT_EQ(fuzzy_match("impl", 1, strings), 1, "fuzzy: subsequence 'impl'");
+    ASSERT_EQ(fuzzy_match("log", 1, strings), 1, "fuzzy: subsequence 'log'");
+    ASSERT_EQ(fuzzy_match("ilf", 1, strings), 1, "fuzzy: subsequence 'ilf' (skipping)");
+    ASSERT_EQ(fuzzy_match("xyz", 1, strings), 0, "fuzzy: non-matching subsequence");
+}
+
+static void test_fuzzy_match_empty(void)
+{
+    const char *strings[] = {"anything"};
+    ASSERT_EQ(fuzzy_match("", 1, strings), 1, "fuzzy: empty pattern matches everything");
+    ASSERT_EQ(fuzzy_match(NULL, 1, strings), 1, "fuzzy: NULL pattern matches everything");
+}
+
+static void test_fuzzy_match_no_strings(void)
+{
+    ASSERT_EQ(fuzzy_match("foo", 0, NULL), 0, "fuzzy: no strings returns 0");
+}
+
+static void test_fuzzy_match_null_string_in_array(void)
+{
+    const char *strings[] = {NULL, "valid"};
+    ASSERT_EQ(fuzzy_match("val", 2, strings), 1, "fuzzy: handles NULL string in array");
+    ASSERT_EQ(fuzzy_match("nope", 2, strings), 0, "fuzzy: non-match with NULL in array");
+}
+
+static void test_fuzzy_match_across_multiple(void)
+{
+    const char *strings[] = {"alpha", "beta", "gamma"};
+    ASSERT_EQ(fuzzy_match("bet", 3, strings), 1, "fuzzy: matches second string");
+    ASSERT_EQ(fuzzy_match("gam", 3, strings), 1, "fuzzy: matches third string");
+    ASSERT_EQ(fuzzy_match("delta", 3, strings), 0, "fuzzy: no match across all");
+}
+
+/* ------------------------------------------------------------------ */
+/* label add/remove tests                                              */
+/* ------------------------------------------------------------------ */
+
+static void test_label_add(void)
+{
+    Board b = board_new();
+    int id = board_add_card(&b, COL_TODO, "task with label");
+    ASSERT_EQ(board_add_label(&b, id, "bug"), 0, "label add: bug added");
+    ASSERT_EQ(board_add_label(&b, id, "feature"), 0, "label add: feature added");
+
+    Card *c = board_get_card(&b, id);
+    ASSERT_NOTNULL(c, "label add: card exists");
+    ASSERT_EQ(c->label_count, 2, "label add: 2 labels");
+    ASSERT_STREQ(c->labels[0], "bug", "label add: first label is bug");
+    ASSERT_STREQ(c->labels[1], "feature", "label add: second label is feature");
+
+    board_free(&b);
+}
+
+static void test_label_add_duplicate(void)
+{
+    Board b = board_new();
+    int id = board_add_card(&b, COL_TODO, "task");
+    ASSERT_EQ(board_add_label(&b, id, "bug"), 0, "label dup: first add ok");
+    ASSERT_EQ(board_add_label(&b, id, "bug"), 0, "label dup: second add is no-op");
+    ASSERT_EQ(board_get_card(&b, id)->label_count, 1, "label dup: count stays 1");
+
+    board_free(&b);
+}
+
+static void test_label_remove(void)
+{
+    Board b = board_new();
+    int id = board_add_card(&b, COL_TODO, "task");
+    board_add_label(&b, id, "bug");
+    board_add_label(&b, id, "feature");
+
+    ASSERT_EQ(board_remove_label(&b, id, "bug"), 0, "label remove: bug removed");
+    Card *c = board_get_card(&b, id);
+    ASSERT_EQ(c->label_count, 1, "label remove: 1 label remaining");
+    ASSERT_STREQ(c->labels[0], "feature", "label remove: feature remains");
+
+    board_free(&b);
+}
+
+static void test_label_remove_nonexistent(void)
+{
+    Board b = board_new();
+    int id = board_add_card(&b, COL_TODO, "task");
+    board_add_label(&b, id, "bug");
+
+    ASSERT_EQ(board_remove_label(&b, id, "nope"), 0, "label remove: nonexistent returns 0");
+    ASSERT_EQ(board_get_card(&b, id)->label_count, 1, "label remove: count unchanged");
+
+    board_free(&b);
+}
+
+/* ------------------------------------------------------------------ */
 
 int main(void)
 {
@@ -320,6 +431,17 @@ int main(void)
     test_get_card();
     test_edit_card_title();
     test_cards_distributed_across_columns();
+    test_fuzzy_match_exact();
+    test_fuzzy_match_case_insensitive();
+    test_fuzzy_match_subsequence();
+    test_fuzzy_match_empty();
+    test_fuzzy_match_no_strings();
+    test_fuzzy_match_null_string_in_array();
+    test_fuzzy_match_across_multiple();
+    test_label_add();
+    test_label_add_duplicate();
+    test_label_remove();
+    test_label_remove_nonexistent();
 
     printf("\n---\n%d tests: %d passed, %d failed\n",
            tests_run, tests_pass, tests_fail);

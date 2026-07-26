@@ -50,4 +50,8 @@ int   db_migrate_from_board(db_t *db, int next_id,
 /* query: does a migration row for `version` exist? */
 int   db_has_migration(db_t *db, int version);
 
+/* labels: get all distinct labels, and labels for a specific card */
+int   db_get_all_labels(db_t *db, char ***names_out, int *count_out);
+int   db_get_card_labels(db_t *db, int card_id, char ***names_out, int *count_out);
+
 #endif

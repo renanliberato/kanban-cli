@@ -28,6 +28,7 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] Iteration 2: BDD test layer (behave/gherkin, 36 scenarios) replacing e2e.py
 - [x] Iteration 3 M1: SQLite storage with JSON auto-migration
 - [x] Iteration 3 M3: Non-interactive CLI subcommands + AI enrich flow (human-in-the-loop review)
+- [x] Iteration 3 M4: Card detail view, label picker, fuzzy filter
 
 ## Git log so far
 - `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)

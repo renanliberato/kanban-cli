@@ -855,3 +855,103 @@ int db_has_migration(db_t *db, int version)
     sqlite3_finalize(stmt);
     return found;
 }
+
+/* ------------------------------------------------------------------ */
+/* labels                                                             */
+/* ------------------------------------------------------------------ */
+
+int db_get_all_labels(db_t *db, char ***names_out, int *count_out)
+{
+    if (!db || !db->conn || !names_out || !count_out) return -1;
+
+    *names_out = NULL;
+    *count_out = 0;
+
+    /* count first */
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "SELECT COUNT(*) FROM labels", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    int count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    if (count == 0) return 0;
+
+    char **names = malloc((size_t)(count + 1) * sizeof(char *));
+    if (!names) return -1;
+
+    rc = sqlite3_prepare_v2(db->conn,
+        "SELECT name FROM labels ORDER BY name", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        free(names);
+        return -1;
+    }
+
+    int idx = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && idx < count) {
+        const char *n = (const char *)sqlite3_column_text(stmt, 0);
+        names[idx] = n ? xstrdup(n) : xstrdup("");
+        idx++;
+    }
+    sqlite3_finalize(stmt);
+
+    names[idx] = NULL;  /* NULL terminator */
+    *names_out = names;
+    *count_out = idx;
+    return 0;
+}
+
+int db_get_card_labels(db_t *db, int card_id, char ***names_out, int *count_out)
+{
+    if (!db || !db->conn || !names_out || !count_out) return -1;
+
+    *names_out = NULL;
+    *count_out = 0;
+
+    /* count first */
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "SELECT COUNT(*) FROM card_labels WHERE card_id = ?", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, card_id);
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    int count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    if (count == 0) return 0;
+
+    char **names = malloc((size_t)(count + 1) * sizeof(char *));
+    if (!names) return -1;
+
+    rc = sqlite3_prepare_v2(db->conn,
+        "SELECT l.name FROM labels l "
+        "JOIN card_labels cl ON cl.label_id = l.id "
+        "WHERE cl.card_id = ? ORDER BY l.name", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        free(names);
+        return -1;
+    }
+    sqlite3_bind_int(stmt, 1, card_id);
+
+    int idx = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && idx < count) {
+        const char *n = (const char *)sqlite3_column_text(stmt, 0);
+        names[idx] = n ? xstrdup(n) : xstrdup("");
+        idx++;
+    }
+    sqlite3_finalize(stmt);
+
+    names[idx] = NULL;
+    *names_out = names;
+    *count_out = idx;
+    return 0;
+}

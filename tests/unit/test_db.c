@@ -54,6 +54,17 @@ static int tests_fail  = 0;
     } \
 } while(0)
 
+#define ASSERT_NULL(a, msg) do { \
+    tests_run++; \
+    if ((a) == NULL) { \
+        tests_pass++; \
+        printf("PASS: %s\n", msg); \
+    } else { \
+        tests_fail++; \
+        printf("FAIL: %s (expected NULL)\n", msg); \
+    } \
+} while(0)
+
 static void cleanup(const char *db_path)
 {
     unlink(db_path);
@@ -240,6 +251,65 @@ static void test_reopen_persistence(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* label db tests                                                      */
+/* ------------------------------------------------------------------ */
+
+static void test_db_add_and_get_labels(void)
+{
+    const char *path = "/tmp/test_db_labels.db";
+    cleanup(path);
+
+    db_t *db = db_open(path);
+    ASSERT_NOTNULL(db, "label db: open ok");
+
+    /* Add a card */
+    ASSERT_EQ(db_add_card(db, 0, 1, "card1"), 0, "label db: card added");
+
+    /* Add labels */
+    ASSERT_EQ(db_add_label(db, 1, "bug"), 0, "label db: bug label added");
+    ASSERT_EQ(db_add_label(db, 1, "feature"), 0, "label db: feature label added");
+
+    /* Get card labels */
+    char **names = NULL;
+    int count = 0;
+    ASSERT_EQ(db_get_card_labels(db, 1, &names, &count), 0, "label db: get card labels ok");
+    ASSERT_EQ(count, 2, "label db: 2 labels on card");
+    ASSERT_STREQ(names[0], "bug", "label db: first label is bug");
+    ASSERT_STREQ(names[1], "feature", "label db: second label is feature");
+    ASSERT_NULL(names[2], "label db: NULL-terminated array");
+
+    for (int i = 0; i < count; i++) free(names[i]);
+    free(names);
+
+    /* Get all labels */
+    ASSERT_EQ(db_get_all_labels(db, &names, &count), 0, "label db: get all labels ok");
+    ASSERT_EQ(count, 2, "label db: 2 total labels");
+
+    for (int i = 0; i < count; i++) free(names[i]);
+    free(names);
+
+    /* Remove a label */
+    ASSERT_EQ(db_remove_label(db, 1, "bug"), 0, "label db: bug removed");
+    ASSERT_EQ(db_get_card_labels(db, 1, &names, &count), 0, "label db: get card labels after remove");
+    ASSERT_EQ(count, 1, "label db: 1 label remaining on card");
+    ASSERT_STREQ(names[0], "feature", "label db: feature remains");
+
+    for (int i = 0; i < count; i++) free(names[i]);
+    free(names);
+
+    /* Get all labels — 'bug' still exists in labels table even if removed from card */
+    ASSERT_EQ(db_get_all_labels(db, &names, &count), 0, "label db: get all labels after remove");
+    /* bug label still exists in the labels table (not used by any card) */
+    ASSERT_TRUE(count >= 1, "label db: at least 1 label exists");
+
+    for (int i = 0; i < count; i++) free(names[i]);
+    free(names);
+
+    db_close(db);
+    cleanup(path);
+}
+
+/* ------------------------------------------------------------------ */
 
 int main(void)
 {
@@ -250,6 +320,7 @@ int main(void)
     test_schema_version_recorded();
     test_crud_roundtrip();
     test_reopen_persistence();
+    test_db_add_and_get_labels();
 
     printf("\n---\n%d tests: %d passed, %d failed\n",
            tests_run, tests_pass, tests_fail);

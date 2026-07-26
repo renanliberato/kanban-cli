@@ -142,7 +142,9 @@ _KEY_MAP = {
     "q":             "q",
     "a":             "a",  "e": "e",  "d": "d",
     "y":             "y",  "n": "n",
+    "t":             "t",  "D": "D",
     "T":             "T",
+    "/":             "/",  "#": "#",
 }
 
 _NAV_TRACK = {
@@ -492,10 +494,30 @@ def step_then_header_count(context, column, count):
     )
 
 
-@then("the screen should show an empty board")
+@then('the screen should show an empty board')
 def step_then_screen_empty_board(context):
     output = screen_content(context.child, context)
     assert "To Do (0)" in output, f"Expected empty To Do. Output: {repr(output[:500])}"
+
+
+@then('the screen should show "{text}"')
+def step_then_screen_shows_text(context, text):
+    """Check that the screen output contains the given text."""
+    time.sleep(0.3)
+    output = screen_content(context.child, context)
+    assert text in output, (
+        f"Expected screen to contain '{text}'. Screen:\n{output[-800:]}"
+    )
+
+
+@then('the screen should not show "{text}"')
+def step_then_screen_not_shows_text(context, text):
+    """Check that the screen output does NOT contain the given text."""
+    time.sleep(0.3)
+    output = screen_content(context.child, context)
+    assert text not in output, (
+        f"Expected screen to NOT contain '{text}'. Screen:\n{output[-800:]}"
+    )
 
 
 # ---------------------------------------------------------------------------

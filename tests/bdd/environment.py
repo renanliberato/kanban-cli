@@ -49,6 +49,7 @@ def spawn_kanban(context, board_path=None, dimensions=(30, 90)):
         args=[board_path],
         env=env,
         encoding="utf-8",
+        codec_errors="replace",
         timeout=8,
         dimensions=dimensions,
     )
