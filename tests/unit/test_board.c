@@ -54,6 +54,17 @@ static int tests_fail  = 0;
     } \
 } while(0)
 
+#define ASSERT_TRUE(cond, msg) do { \
+    tests_run++; \
+    if ((cond)) { \
+        tests_pass++; \
+        printf("PASS: %s\n", msg); \
+    } else { \
+        tests_fail++; \
+        printf("FAIL: %s (expected true)\n", msg); \
+    } \
+} while(0)
+
 /* helper: derive .db path from a .json path for cleanup */
 static char *derive_db_path(const char *json_path)
 {
@@ -416,6 +427,86 @@ static void test_label_remove_nonexistent(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* comment tests                                                       */
+/* ------------------------------------------------------------------ */
+
+static void test_add_comment(void)
+{
+    const char *path = "/tmp/test_board_comments.json";
+    cleanup(path);
+
+    Board b;
+    ASSERT_EQ(board_load(&b, path), 0, "comment: board_load ok");
+
+    int id = board_add_card(&b, COL_TODO, "task");
+
+    ASSERT_EQ(board_add_comment(&b, id, "alice", "hello world"), 0,
+              "comment: add succeeds");
+
+    Comment *comments = NULL;
+    int count = 0;
+    ASSERT_EQ(board_get_comments(&b, id, &comments, &count), 0,
+              "comment: get comments succeeds");
+    ASSERT_EQ(count, 1, "comment: 1 comment");
+    ASSERT_STREQ(comments[0].author, "alice", "comment: author correct");
+    ASSERT_STREQ(comments[0].body, "hello world", "comment: body correct");
+    ASSERT_NOTNULL(comments[0].created_at, "comment: has created_at");
+
+    board_free_comments(comments, count);
+    board_free(&b);
+    cleanup(path);
+}
+
+static void test_multiple_comments(void)
+{
+    const char *path = "/tmp/test_board_multi_comments.json";
+    cleanup(path);
+
+    Board b;
+    ASSERT_EQ(board_load(&b, path), 0, "comment multi: board_load ok");
+
+    int id = board_add_card(&b, COL_TODO, "task");
+
+    ASSERT_EQ(board_add_comment(&b, id, "alice", "first"), 0,
+              "comment multi: first added");
+    ASSERT_EQ(board_add_comment(&b, id, "bob", "second"), 0,
+              "comment multi: second added");
+    ASSERT_EQ(board_add_comment(&b, id, "carol", "third"), 0,
+              "comment multi: third added");
+
+    Comment *comments = NULL;
+    int count = 0;
+    ASSERT_EQ(board_get_comments(&b, id, &comments, &count), 0,
+              "comment multi: get comments");
+    ASSERT_EQ(count, 3, "comment multi: 3 comments");
+    ASSERT_STREQ(comments[0].author, "alice", "comment multi: first author");
+    ASSERT_STREQ(comments[1].author, "bob", "comment multi: second author");
+    ASSERT_STREQ(comments[2].author, "carol", "comment multi: third author");
+
+    /* verify ordering (by created_at, id) */
+    ASSERT_TRUE(comments[0].id < comments[1].id, "comment multi: id ordering");
+    ASSERT_TRUE(comments[1].id < comments[2].id, "comment multi: id ordering 2");
+
+    board_free_comments(comments, count);
+    board_free(&b);
+    cleanup(path);
+}
+
+static void test_comment_missing_card(void)
+{
+    const char *path = "/tmp/test_board_comment_missing.json";
+    cleanup(path);
+
+    Board b;
+    ASSERT_EQ(board_load(&b, path), 0, "comment miss: board_load ok");
+
+    ASSERT_EQ(board_add_comment(&b, 999, "alice", "nope"), -1,
+              "comment: non-existent card returns -1");
+    board_free(&b);
+    cleanup(path);
+}
+
+/* ------------------------------------------------------------------ */
 
 int main(void)
 {
@@ -442,6 +533,9 @@ int main(void)
     test_label_add_duplicate();
     test_label_remove();
     test_label_remove_nonexistent();
+    test_add_comment();
+    test_multiple_comments();
+    test_comment_missing_card();
 
     printf("\n---\n%d tests: %d passed, %d failed\n",
            tests_run, tests_pass, tests_fail);

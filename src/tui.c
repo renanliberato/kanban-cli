@@ -30,10 +30,10 @@ static char *tstrdup(const char *s)
 #define NARROW_THRESHOLD    60    /* < 60 cols -> single-column narrow mode */
 #define INPUT_MAX           128
 #define FLASH_DURATION       2    /* seconds flash message stays visible */
-#define REVIEW_FIELD_MAX    32   /* max fields in review screen */
 #define FILTER_MAX          128
 #define LABEL_PICKER_MAX    64   /* max labels in picker */
 #define DETAIL_MAX_WIDTH    80   /* max width for description wrapping */
+#define COMMENT_INPUT_MAX   2048  /* max comment body size */
 
 enum { COL_TUI_TODO = 0, COL_TUI_DOING = 1, COL_TUI_DONE = 2 };
 
@@ -56,19 +56,8 @@ static int    g_spinner_idx = 0;
 static const char g_spinner_chars[] = "|/-\\";
 
 /* enrich review mode state */
-static int  g_review_mode  = 0;
-static int  g_review_card_id = -1;
-static int  g_review_fields = 0;
-static int  g_review_sel    = 0;          /* selected field index (0 = Confirm button) */
-static int  g_review_accepted[REVIEW_FIELD_MAX];  /* 0=rejected, 1=accepted */
-struct review_field {
-    int  type;     /* 0=description, 1=label, 2=question */
-    char text[256];
-    char extra[256]; /* answer text for questions */
-};
-static struct review_field g_review_items[REVIEW_FIELD_MAX];
 
-static int  g_enrich_job_id = -1;  /* job we're waiting for in review */
+static int  g_enrich_job_id = -1;  /* job we're waiting for in review (M7a: direct-apply on complete) */
 
 /* detail view state */
 static int  g_detail_mode   = 0;
@@ -101,8 +90,6 @@ enum {
     PAIR_HEADER_DONE,
     PAIR_SELECTED,
     PAIR_STATUSBAR,
-    PAIR_REVIEW_ACCEPTED,
-    PAIR_REVIEW_REJECTED,
     /* label tag colors: pair ids 8..15 */
     PAIR_LABEL_0 = 8,
     PAIR_LABEL_1,
@@ -404,8 +391,6 @@ static void tui_init(void)
         init_pair(PAIR_HEADER_DONE,  COLOR_WHITE, header_bg[COL_TUI_DONE]);
         init_pair(PAIR_SELECTED, COLOR_BLACK, COLOR_WHITE);
         init_pair(PAIR_STATUSBAR, COLOR_BLACK, COLOR_WHITE);
-        init_pair(PAIR_REVIEW_ACCEPTED, COLOR_GREEN, COLOR_BLACK);
-        init_pair(PAIR_REVIEW_REJECTED, COLOR_RED, COLOR_BLACK);
 
         /* Label tag colors: deterministic palette (hash mod 8).
            No config in v3 — note for future: add configurable palette. */
@@ -707,6 +692,45 @@ static void draw_label_picker(void)
 
 /* ---- detail view draw ---- */
 
+/* Helper: wrap text into lines of max width. Returns number of lines.
+   Lines are stored in `lines` (max MAX_DETAIL_LINES entries). */
+#define MAX_DETAIL_LINES 1024
+
+static int wrap_text(const char *text, int width,
+                     char lines[][128], int max_lines)
+{
+    if (!text || !text[0]) return 0;
+    int count = 0;
+    int pos = 0;
+    int tlen = (int)strlen(text);
+
+    while (pos < tlen && count < max_lines) {
+        /* skip leading newlines */
+        while (pos < tlen && text[pos] == '\n') pos++;
+        if (pos >= tlen) break;
+
+        int line_len = 0;
+        int line_start = pos;
+
+        while (pos < tlen && text[pos] != '\n' && line_len < width) {
+            line_len++;
+            pos++;
+        }
+
+        if (line_len > 0) {
+            if (line_len > (int)sizeof(lines[0]) - 1)
+                line_len = (int)sizeof(lines[0]) - 1;
+            memcpy(lines[count], text + line_start, (size_t)line_len);
+            lines[count][line_len] = '\0';
+            count++;
+        }
+
+        if (pos < tlen && text[pos] == '\n') pos++;
+    }
+
+    return count;
+}
+
 static void draw_detail_view(const Board *board)
 {
     erase();
@@ -725,6 +749,8 @@ static void draw_detail_view(const Board *board)
         mvaddstr(rows / 2, (cols - 20) / 2, "Card not found.");
         return;
     }
+
+    /* --- constant header area --- */
 
     /* Title bar */
     if (has_color) attron(A_REVERSE);
@@ -785,123 +811,245 @@ static void draw_detail_view(const Board *board)
         y += 2;
     }
 
-    /* Description (scrollable) */
-    y++;
-    mvaddstr(y, 2, "Description:");
-    y++;
-    if (card->description && card->description[0]) {
-        int max_view_lines = rows - y - 6;
-        if (max_view_lines < 0) max_view_lines = 0;
+    /* --- scrollable content area: description + comments --- */
 
-        /* Simple word-wrap: wrap at cols-4 */
+    int content_start = y + 1;   /* one blank line after labels */
+    int content_end   = rows - 2; /* leave room for bottom hint */
+    int visible_lines = content_end - content_start;
+    if (visible_lines < 1) visible_lines = 1;
+
+    /* Build unified scroll buffer: each entry has a type and text */
+    #define SL_TYPE_TEXT    0
+    #define SL_TYPE_COMMENT 1
+    #define SL_TYPE_BLANK   2
+    #define SL_TYPE_SECTION 3
+
+    static struct {
+        int type;
+        char text[128];
+        int indent;    /* spaces of left indent */
+        int dimmed;    /* render with A_DIM */
+    } scroll_lines[MAX_DETAIL_LINES];
+
+    int sl_count = 0;
+
+    /* Description section header */
+    if (sl_count < MAX_DETAIL_LINES) {
+        scroll_lines[sl_count].type = SL_TYPE_SECTION;
+        snprintf(scroll_lines[sl_count].text, sizeof(scroll_lines[sl_count].text),
+                 "Description:");
+        scroll_lines[sl_count].indent = 2;
+        scroll_lines[sl_count].dimmed = 0;
+        sl_count++;
+    }
+
+    if (card->description && card->description[0]) {
+        static char desc_lines[512][128];
         int wrap_width = cols - 4;
         if (wrap_width < 10) wrap_width = 10;
-        const char *desc = card->description;
-        int desc_len = (int)strlen(desc);
-
-        /* Collect wrapped lines */
-        static char wrap_lines[512][128];
-        int wrap_count = 0;
-        int pos = 0;
-
-        while (pos < desc_len && wrap_count < 500) {
-            int line_len = 0;
-            int line_start = pos;
-
-            /* skip leading whitespace on new logical line */
-            while (pos < desc_len && desc[pos] == '\n') pos++;
-
-            /* find break point */
-            while (pos < desc_len && desc[pos] != '\n' && line_len < wrap_width) {
-                line_len++;
-                pos++;
-            }
-
-            if (line_len > 0) {
-                if (line_len > (int)sizeof(wrap_lines[0]) - 1)
-                    line_len = (int)sizeof(wrap_lines[0]) - 1;
-                memcpy(wrap_lines[wrap_count], desc + line_start, (size_t)line_len);
-                wrap_lines[wrap_count][line_len] = '\0';
-                wrap_count++;
-            }
-
-            /* consume the newline if we stopped on one */
-            if (pos < desc_len && desc[pos] == '\n') pos++;
-        }
-
-        if (wrap_count == 0) {
-            int slen = desc_len > wrap_width ? wrap_width : desc_len;
-            if (slen > (int)sizeof(wrap_lines[0]) - 1)
-                slen = (int)sizeof(wrap_lines[0]) - 1;
-            memcpy(wrap_lines[0], desc, (size_t)slen);
-            wrap_lines[0][slen] = '\0';
-            wrap_count = 1;
-        }
-
-        /* Clamp scroll offset */
-        if (g_detail_scroll < 0) g_detail_scroll = 0;
-        if (g_detail_scroll > wrap_count - max_view_lines)
-            g_detail_scroll = wrap_count - max_view_lines;
-        if (g_detail_scroll < 0) g_detail_scroll = 0;
-
-        for (int i = g_detail_scroll; i < wrap_count && (i - g_detail_scroll) < max_view_lines; i++) {
-            mvaddstr(y, 4, wrap_lines[i]);
-            y++;
-        }
-
-        /* Scroll indicator */
-        if (wrap_count > max_view_lines) {
-            move(rows - 2, cols - 20);
-            addstr("(j/k scroll) ");
-            int pct = (wrap_count > 0) ? (g_detail_scroll * 100 / (wrap_count - max_view_lines)) : 0;
-            if (pct > 100) pct = 100;
-            char pctbuf[16];
-            snprintf(pctbuf, sizeof(pctbuf), "%d%%", pct);
-            addstr(pctbuf);
+        int dl = wrap_text(card->description, wrap_width, desc_lines, 500);
+        for (int i = 0; i < dl && sl_count < MAX_DETAIL_LINES; i++) {
+            scroll_lines[sl_count].type = SL_TYPE_TEXT;
+            snprintf(scroll_lines[sl_count].text,
+                     sizeof(scroll_lines[sl_count].text), "%s", desc_lines[i]);
+            scroll_lines[sl_count].indent = 4;
+            scroll_lines[sl_count].dimmed = 0;
+            sl_count++;
         }
     } else {
-        mvaddstr(y, 4, "No description -- press D to add, C-E to enrich");
-        y++;
+        if (sl_count < MAX_DETAIL_LINES) {
+            scroll_lines[sl_count].type = SL_TYPE_TEXT;
+            snprintf(scroll_lines[sl_count].text, sizeof(scroll_lines[sl_count].text),
+                     "No description -- press D to add, C-E to enrich");
+            scroll_lines[sl_count].indent = 4;
+            scroll_lines[sl_count].dimmed = 0;
+            sl_count++;
+        }
     }
 
-    /* Q&A placeholder */
-    y += 2;
+    /* Blank line before comments */
+    if (sl_count < MAX_DETAIL_LINES) {
+        scroll_lines[sl_count].type = SL_TYPE_BLANK;
+        scroll_lines[sl_count].indent = 0;
+        scroll_lines[sl_count].dimmed = 0;
+        sl_count++;
+    }
+
+    /* Comments section */
+    if (sl_count < MAX_DETAIL_LINES) {
+        scroll_lines[sl_count].type = SL_TYPE_SECTION;
+        snprintf(scroll_lines[sl_count].text, sizeof(scroll_lines[sl_count].text),
+                 "Comments:");
+        scroll_lines[sl_count].indent = 2;
+        scroll_lines[sl_count].dimmed = 0;
+        sl_count++;
+    }
+
+    /* Fetch comments from the board */
+    Comment *comments = NULL;
+    int comment_count = 0;
+    /* Use a mutable copy of the board pointer — board_get_comments takes Board* */
+    board_get_comments((Board *)board, g_detail_card_id, &comments, &comment_count);
+
+    if (comment_count == 0) {
+        if (sl_count < MAX_DETAIL_LINES) {
+            scroll_lines[sl_count].type = SL_TYPE_TEXT;
+            snprintf(scroll_lines[sl_count].text, sizeof(scroll_lines[sl_count].text),
+                     "No comments yet -- press c");
+            scroll_lines[sl_count].indent = 4;
+            scroll_lines[sl_count].dimmed = 0;
+            sl_count++;
+        }
+    } else {
+        int wrap_width = cols - 4;
+        if (wrap_width < 8) wrap_width = 8;
+        for (int ci = 0; ci < comment_count; ci++) {
+            if (sl_count >= MAX_DETAIL_LINES - 10) break;
+            Comment *cmt = &comments[ci];
+
+            /* Header: "author · 2026-07-25 14:03" */
+            if (sl_count < MAX_DETAIL_LINES) {
+                scroll_lines[sl_count].type = SL_TYPE_COMMENT;
+                snprintf(scroll_lines[sl_count].text,
+                         sizeof(scroll_lines[sl_count].text),
+                         "%s \302\267 %s", cmt->author, cmt->created_at);
+                scroll_lines[sl_count].indent = 4;
+                scroll_lines[sl_count].dimmed = 1;  /* dim */
+                sl_count++;
+            }
+
+            /* Body lines */
+            if (cmt->body && cmt->body[0]) {
+                static char body_lines[512][128];
+                int bl = wrap_text(cmt->body, wrap_width - 2, body_lines, 500);
+                for (int i = 0; i < bl && sl_count < MAX_DETAIL_LINES; i++) {
+                    scroll_lines[sl_count].type = SL_TYPE_TEXT;
+                    snprintf(scroll_lines[sl_count].text,
+                             sizeof(scroll_lines[sl_count].text),
+                             "%s", body_lines[i]);
+                    scroll_lines[sl_count].indent = 6;
+                    scroll_lines[sl_count].dimmed = 0;
+                    sl_count++;
+                }
+            }
+
+            /* Blank line between comments */
+            if (sl_count < MAX_DETAIL_LINES) {
+                scroll_lines[sl_count].type = SL_TYPE_BLANK;
+                scroll_lines[sl_count].indent = 0;
+                scroll_lines[sl_count].dimmed = 0;
+                sl_count++;
+            }
+        }
+    }
+
+    board_free_comments(comments, comment_count);
+
+    /* Timestamps at the bottom of scrollable content */
     {
-        if (has_color) attron(A_BOLD);
-        mvaddstr(y, 2, "Q&A:");
-        if (has_color) attroff(A_BOLD);
-        y++;
-        mvaddstr(y, 4, "No Q&A yet.  (coming in M6)");
-        y++;
+        char tbuf[128];
+        if (card->created_at) {
+            if (sl_count < MAX_DETAIL_LINES) {
+                snprintf(tbuf, sizeof(tbuf), "Created: %s", card->created_at);
+                scroll_lines[sl_count].type = SL_TYPE_TEXT;
+                snprintf(scroll_lines[sl_count].text,
+                         sizeof(scroll_lines[sl_count].text), "%s", tbuf);
+                scroll_lines[sl_count].indent = 2;
+                scroll_lines[sl_count].dimmed = 1;
+                sl_count++;
+            }
+        }
+        if (card->updated_at) {
+            if (sl_count < MAX_DETAIL_LINES) {
+                snprintf(tbuf, sizeof(tbuf), "Updated: %s", card->updated_at);
+                scroll_lines[sl_count].type = SL_TYPE_TEXT;
+                snprintf(scroll_lines[sl_count].text,
+                         sizeof(scroll_lines[sl_count].text), "%s", tbuf);
+                scroll_lines[sl_count].indent = 2;
+                scroll_lines[sl_count].dimmed = 1;
+                sl_count++;
+            }
+        }
     }
 
-    /* Timestamps */
-    y += 1;
-    if (card->created_at) {
-        char tbuf[64];
-        snprintf(tbuf, sizeof(tbuf), "Created: %s", card->created_at);
-        mvaddstr(y, 2, tbuf);
-        y++;
-    }
-    if (card->updated_at) {
-        char tbuf[64];
-        snprintf(tbuf, sizeof(tbuf), "Updated: %s", card->updated_at);
-        mvaddstr(y, 2, tbuf);
-        y++;
-    }
-
-    /* Card ID line */
+    /* Card ID */
     {
         char idbuf[32];
         snprintf(idbuf, sizeof(idbuf), "Card ID: %d", g_detail_card_id);
-        mvaddstr(y, 2, idbuf);
+        if (sl_count < MAX_DETAIL_LINES) {
+            scroll_lines[sl_count].type = SL_TYPE_TEXT;
+            snprintf(scroll_lines[sl_count].text,
+                     sizeof(scroll_lines[sl_count].text), "%s", idbuf);
+            scroll_lines[sl_count].indent = 2;
+            scroll_lines[sl_count].dimmed = 1;
+            sl_count++;
+        }
+    }
+
+    /* Clamp scroll offset */
+    if (g_detail_scroll < 0) g_detail_scroll = 0;
+    if (g_detail_scroll > sl_count - visible_lines)
+        g_detail_scroll = sl_count - visible_lines;
+    if (g_detail_scroll < 0) g_detail_scroll = 0;
+
+    /* Render visible scroll lines */
+    int render_y = content_start;
+    for (int i = g_detail_scroll; i < sl_count && render_y < content_end; i++) {
+        int sl_type = scroll_lines[i].type;
+        if (sl_type == SL_TYPE_BLANK) {
+            render_y++;
+            continue;
+        }
+
+        int indent = scroll_lines[i].indent;
+        const char *txt = scroll_lines[i].text;
+
+        if (scroll_lines[i].dimmed && has_color)
+            attron(A_DIM);
+
+        if (sl_type == SL_TYPE_SECTION && has_color)
+            attron(A_BOLD);
+
+        move(render_y, indent);
+        int remaining = cols - indent;
+        int slen = (int)strlen(txt);
+        if (slen > remaining) slen = remaining;
+        for (int j = 0; j < slen; j++)
+            addch((unsigned char)txt[j]);
+
+        if (sl_type == SL_TYPE_SECTION && has_color)
+            attroff(A_BOLD);
+        if (scroll_lines[i].dimmed && has_color)
+            attroff(A_DIM);
+
+        render_y++;
+    }
+
+    /* Scroll indicator */
+    if (sl_count > visible_lines) {
+        int pct = (sl_count > 0) ? (g_detail_scroll * 100 / (sl_count - visible_lines)) : 0;
+        if (pct > 100) pct = 100;
+        char pctbuf[32];
+        snprintf(pctbuf, sizeof(pctbuf), " %d%% (j/k/PgUp/PgDn) ", pct);
+        int px = cols - (int)strlen(pctbuf);
+        if (px < 0) px = 0;
+        if (rows > 0) {
+            move(rows - 2, px);
+            if (has_color) attron(A_REVERSE);
+            addstr(pctbuf);
+            if (has_color) attroff(A_REVERSE);
+        }
     }
 
     /* Bottom hint */
     move(rows - 1, 0);
     if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
     else attron(A_REVERSE);
-    const char *hint = " ESC/q=back  t=edit title  D=edit desc  l=labels  x=archive  u=undo  j/k/PgUp/PgDn=scroll ";
+    const char *hint;
+    if (g_flash_until && time(NULL) < g_flash_until)
+        hint = g_flash_buf;
+    else
+        hint = " ESC/q=back  t=title  D=desc  l=labels  c=comment  x=archive  C-E=enrich  u=undo  j/k/PgUp/PgDn=scroll ";
     for (int i = 0; i < cols; i++) {
         if (i < (int)strlen(hint))
             addch((unsigned char)hint[i]);
@@ -946,260 +1094,6 @@ static void draw_filter_bar(void)
     else attroff(A_REVERSE);
 
     refresh();
-}
-
-/* ---- review screen draw ---- */
-
-static void draw_review_screen(void)
-{
-    erase();
-
-    int rows = LINES;
-    int cols = COLS;
-
-    if (rows < 10 || cols < 40) {
-        mvaddstr(rows / 2, (cols - 40) / 2 > 0 ? (cols - 40) / 2 : 0,
-                 "Terminal too small for review.");
-        return;
-    }
-
-    /* Title bar */
-    if (has_color) attron(A_REVERSE);
-    move(0, 0);
-    char title[64];
-    snprintf(title, sizeof(title), " AI Enrich - Card #%d  ", g_review_card_id);
-    for (int i = 0; i < cols; i++) addch(' ');
-    mvaddstr(0, (cols - (int)strlen(title)) / 2, title);
-    if (has_color) attroff(A_REVERSE);
-
-    /* Field list */
-    int y = 2;
-    for (int i = 0; i < g_review_fields; i++) {
-        if (y >= rows - 2) break;
-        int is_sel = (i == g_review_sel);
-        int accepted = g_review_accepted[i];
-
-        if (is_sel) {
-            if (has_color) attron(A_REVERSE);
-            else attron(A_BOLD);
-        }
-
-        /* Checkmark */
-        move(y, 2);
-        if (accepted)
-            addstr("[x] ");
-        else
-            addstr("[ ] ");
-
-        /* Field content */
-        struct review_field *f = &g_review_items[i];
-        switch (f->type) {
-        case 0: /* description */
-            addstr("Description: ");
-            {
-                int remaining = cols - 20;
-                int slen = (int)strlen(f->text);
-                if (slen > remaining)
-                    slen = remaining - 3;
-                for (int j = 0; j < slen; j++)
-                    addch((unsigned char)f->text[j]);
-                if ((int)strlen(f->text) > remaining)
-                    addstr("...");
-            }
-            break;
-        case 1: /* label */
-            addstr("Label: ");
-            addstr(f->text);
-            break;
-        case 2: /* question */
-            addstr("Q: ");
-            {
-                int remaining = (cols - 10) / 2;
-                int slen = (int)strlen(f->text);
-                if (slen > remaining) slen = remaining - 2;
-                for (int j = 0; j < slen; j++)
-                    addch((unsigned char)f->text[j]);
-                if ((int)strlen(f->text) > remaining)
-                    addstr("..");
-            }
-            addstr("  A: ");
-            {
-                int remaining = (cols - 16) / 2;
-                int slen = (int)strlen(f->extra);
-                if (slen > remaining) slen = remaining - 2;
-                for (int j = 0; j < slen; j++)
-                    addch((unsigned char)f->extra[j]);
-                if ((int)strlen(f->extra) > remaining)
-                    addstr("..");
-            }
-            break;
-        }
-
-        if (is_sel) {
-            if (has_color) attroff(A_REVERSE);
-            else attroff(A_BOLD);
-        }
-        y++;
-    }
-
-    /* Confirm button */
-    y++;
-    if (y < rows - 2) {
-        int is_sel = (g_review_sel == g_review_fields);
-        if (is_sel) {
-            if (has_color) attron(A_REVERSE);
-            else attron(A_BOLD);
-        }
-        mvaddstr(y, (cols - 20) / 2, "  [ Confirm & Apply ]  ");
-        if (is_sel) {
-            if (has_color) attroff(A_REVERSE);
-            else attroff(A_BOLD);
-        }
-    }
-
-    /* Bottom hint */
-    move(rows - 1, 0);
-    if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
-    else attron(A_REVERSE);
-    const char *hint = " Enter/Space=toggle  j/k=navigate  c=confirm  ESC=discard ";
-    for (int i = 0; i < cols; i++) {
-        if (i < (int)strlen(hint))
-            addch((unsigned char)hint[i]);
-        else
-            addch(' ');
-    }
-    if (has_color) attroff(COLOR_PAIR(PAIR_STATUSBAR));
-    else attroff(A_REVERSE);
-
-    refresh();
-}
-
-/* ---- review helpers ---- */
-
-/* Build review fields from an EnrichResult */
-static void review_build_fields(const EnrichResult *er)
-{
-    g_review_fields = 0;
-
-    /* Description (always present, may be NULL) */
-    if (er->description) {
-        struct review_field *f = &g_review_items[g_review_fields];
-        f->type = 0;
-        snprintf(f->text, sizeof(f->text), "%s", er->description);
-        f->extra[0] = '\0';
-        g_review_accepted[g_review_fields] = 1; /* default: accepted */
-        g_review_fields++;
-    }
-
-    /* Labels */
-    for (int i = 0; er->labels && er->labels[i]; i++) {
-        if (g_review_fields >= REVIEW_FIELD_MAX) break;
-        struct review_field *f = &g_review_items[g_review_fields];
-        f->type = 1;
-        snprintf(f->text, sizeof(f->text), "%s", er->labels[i]);
-        f->extra[0] = '\0';
-        g_review_accepted[g_review_fields] = 1;
-        g_review_fields++;
-    }
-
-    /* Questions */
-    for (int i = 0; er->questions && er->questions[i]; i++) {
-        if (g_review_fields >= REVIEW_FIELD_MAX) break;
-        struct review_field *f = &g_review_items[g_review_fields];
-        f->type = 2;
-        snprintf(f->text, sizeof(f->text), "%s", er->questions[i]);
-        snprintf(f->extra, sizeof(f->extra), "%s",
-                 er->answers && er->answers[i] ? er->answers[i] : "");
-        g_review_accepted[g_review_fields] = 1;
-        g_review_fields++;
-    }
-
-    g_review_sel = 0;
-}
-
-/* Apply accepted fields to the card */
-static void review_apply(Board *board)
-{
-    EnrichResult er;
-    memset(&er, 0, sizeof(er));
-
-    /* Collect accepted fields back into an EnrichResult for application */
-    for (int i = 0; i < g_review_fields; i++) {
-        if (!g_review_accepted[i]) continue;
-        struct review_field *f = &g_review_items[i];
-        switch (f->type) {
-        case 0: /* description */
-            board_set_card_description(board, g_review_card_id, f->text);
-            break;
-        case 1: /* label */
-            board_add_label(board, g_review_card_id, f->text);
-            break;
-        case 2: /* question — store as Q&A? Not implemented in card model yet.
-                   For now, skip. */
-            break;
-        }
-    }
-
-    autosave(board);
-}
-
-static void review_cleanup(void)
-{
-    g_review_mode = 0;
-    g_review_card_id = -1;
-    g_review_fields = 0;
-}
-
-/* ---- review input handler ---- */
-
-static int handle_review_input(Board *board, int ch)
-{
-    switch (ch) {
-    case 'q':  /* fall through: q in review cancels (some users expect this) */
-    case 27:   /* ESC — discard all */
-        review_cleanup();
-        return 1;
-
-    case 'j':
-    case KEY_DOWN:
-        g_review_sel++;
-        if (g_review_sel > g_review_fields)
-            g_review_sel = g_review_fields; /* clamp to Confirm button */
-        return 1;
-
-    case 'k':
-    case KEY_UP:
-        if (g_review_sel > 0)
-            g_review_sel--;
-        return 1;
-
-    case '\n':
-    case '\r':
-    case KEY_ENTER:
-    case ' ':
-        if (g_review_sel == g_review_fields) {
-            /* Confirm button — apply and exit */
-            review_apply(board);
-            review_cleanup();
-        } else {
-            /* Toggle acceptance */
-            g_review_accepted[g_review_sel] = !g_review_accepted[g_review_sel];
-        }
-        return 1;
-
-    case 'c':
-    case 'C':
-        /* Confirm directly */
-        review_apply(board);
-        review_cleanup();
-        return 1;
-
-    case KEY_RESIZE:
-        return 1;
-
-    default:
-        return 1;
-    }
 }
 
 /* ---- narrow mode (single-column) draw ---- */
@@ -1446,11 +1340,6 @@ static void draw_narrow_view(const Board *board)
 
 static void tui_draw(const Board *board)
 {
-    if (g_review_mode) {
-        draw_review_screen();
-        return;
-    }
-
     if (g_detail_mode) {
         draw_detail_view(board);
         return;
@@ -1948,6 +1837,21 @@ static int handle_detail_input(Board *board, int ch)
     case 'L':
         label_picker_init(board, g_detail_card_id);
         return 1;
+
+    case 'c': {
+        char buf[COMMENT_INPUT_MAX + 1] = "";
+        if (input_line("Add comment: ", buf, sizeof(buf), "") == 0
+            && buf[0] != '\0') {
+            const char *author = getenv("USER");
+            if (!author || !author[0]) author = "me";
+            board_add_comment(board, g_detail_card_id, author, buf);
+            autosave(board);
+            snprintf(g_flash_buf, sizeof(g_flash_buf),
+                     "Comment added");
+            g_flash_until = time(NULL) + FLASH_DURATION;
+        }
+        return 1;
+    }
 
     case 'x': {
         Card *card = board_get_card(board, g_detail_card_id);
@@ -2454,13 +2358,11 @@ static int handle_input(Board *board, int ch)
 }
 
 /* ------------------------------------------------------------------ */
-/* check enrich job completion and transition to review               */
+/* check enrich job completion — M7a: direct-apply (no review screen) */
 /* ------------------------------------------------------------------ */
 
 static void check_enrich_completion(void)
 {
-    (void)g_board;  /* may be used in future */
-
     if (g_enrich_job_id < 0) return;
 
     const LlmJob *job = llm_get_job(g_enrich_job_id);
@@ -2472,13 +2374,13 @@ static void check_enrich_completion(void)
     if (job->state == LLM_FAILED || job->state == LLM_CANCELLED) {
         if (job->state == LLM_FAILED && job->result && job->result[0]) {
             snprintf(g_flash_buf, sizeof(g_flash_buf),
-                     "Enrich job failed: %s", job->result);
+                     "Enrich failed: %s", job->result);
         } else if (job->state == LLM_CANCELLED) {
             snprintf(g_flash_buf, sizeof(g_flash_buf),
-                     "Enrich job cancelled");
+                     "Enrich cancelled");
         } else {
             snprintf(g_flash_buf, sizeof(g_flash_buf),
-                     "Enrich job failed");
+                     "Enrich failed");
         }
         g_flash_until = time(NULL) + FLASH_DURATION;
         g_enrich_job_id = -1;
@@ -2487,12 +2389,12 @@ static void check_enrich_completion(void)
 
     if (job->state != LLM_DONE) return;
 
-    /* Job completed — parse result and enter review mode */
+    /* Job completed — parse result and apply directly (no review screen) */
     g_enrich_job_id = -1;
 
     if (!job->result) {
         snprintf(g_flash_buf, sizeof(g_flash_buf),
-                 "Enrich job returned empty result");
+                 "Enrich returned empty result");
         g_flash_until = time(NULL) + FLASH_DURATION;
         return;
     }
@@ -2515,11 +2417,35 @@ static void check_enrich_completion(void)
     }
     free(inner);
 
-    /* Enter review mode */
-    g_review_mode = 1;
-    g_review_card_id = job->card_id;
-    review_build_fields(&er);
+    /* Push undo snapshot for description (labels are not undone by undo) */
+    Card *card = board_get_card(g_board, job->card_id);
+    if (card) {
+        UndoOp op;
+        memset(&op, 0, sizeof(op));
+        op.type = UNDO_EDIT_DESC;
+        op.card_id = job->card_id;
+        op.orig_col = state.sel_col;
+        op.snap_description = card->description ? tstrdup(card->description) : NULL;
+        undo_push(op);
+    }
+
+    /* Apply description (overwrite) */
+    if (er.description && er.description[0])
+        board_set_card_description(g_board, job->card_id, er.description);
+
+    /* Merge new labels */
+    for (int li = 0; li < er.label_count; li++) {
+        if (er.labels[li] && er.labels[li][0])
+            board_add_label(g_board, job->card_id, er.labels[li]);
+    }
+
     enrich_free_result(&er);
+    autosave(g_board);
+
+    g_undo_pending = 1;
+    snprintf(g_flash_buf, sizeof(g_flash_buf),
+             "Enriched (u to undo)");
+    g_flash_until = time(NULL) + FLASH_DURATION;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2569,8 +2495,6 @@ int tui_run(Board *board, const char *save_path, const char *board_name)
                 running = handle_label_picker_input(board, ch);
             } else if (g_detail_mode) {
                 running = handle_detail_input(board, ch);
-            } else if (g_review_mode) {
-                running = handle_review_input(board, ch);
             } else {
                 running = handle_input(board, ch);
             }

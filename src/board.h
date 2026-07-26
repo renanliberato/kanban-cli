@@ -59,6 +59,20 @@ int  board_restore_card(Board *b, int id, int col, int pos,
 /* labels: get all labels across the board (from db) */
 int  board_get_all_labels(Board *b, char ***names_out, int *count_out);
 
+/* M7: comments */
+typedef struct {
+    int    id;
+    char  *author;
+    char  *body;
+    char  *created_at;
+} Comment;
+
+int  board_add_comment(Board *b, int card_id, const char *author,
+                       const char *body);
+int  board_get_comments(Board *b, int card_id, Comment **comments_out,
+                        int *count_out);
+void board_free_comments(Comment *comments, int count);
+
 /* fuzzy match: case-insensitive subsequence match.
    Returns 1 if `pattern` is a subsequence of any of the strings,
    or if `pattern` is empty (match everything).

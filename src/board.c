@@ -463,6 +463,81 @@ int board_get_all_labels(Board *b, char ***names_out, int *count_out)
 }
 
 /* ------------------------------------------------------------------ */
+/* M7: comments                                                        */
+/* ------------------------------------------------------------------ */
+
+int board_add_comment(Board *b, int card_id, const char *author,
+                       const char *body)
+{
+    if (!b || !author || !body) return -1;
+
+    /* verify card exists */
+    Card *card = board_get_card(b, card_id);
+    if (!card) return -1;
+
+    if (b->db_handle)
+        return db_add_comment((db_t *)b->db_handle, card_id, author, body);
+
+    return -1;
+}
+
+int board_get_comments(Board *b, int card_id, Comment **comments_out,
+                        int *count_out)
+{
+    if (!b || !comments_out || !count_out) return -1;
+
+    *comments_out = NULL;
+    *count_out = 0;
+
+    if (!b->db_handle) return -1;
+
+    int *ids = NULL;
+    char **authors = NULL;
+    char **bodies = NULL;
+    char **cats = NULL;
+    int count = 0;
+
+    int rc = db_get_comments((db_t *)b->db_handle, card_id,
+                             &ids, &authors, &bodies, &cats, &count);
+    if (rc != 0) return -1;
+    if (count == 0) return 0;
+
+    Comment *comments = malloc((size_t)count * sizeof(Comment));
+    if (!comments) {
+        for (int i = 0; i < count; i++) {
+            free(authors[i]); free(bodies[i]); free(cats[i]);
+        }
+        free(ids); free(authors); free(bodies); free(cats);
+        return -1;
+    }
+
+    for (int i = 0; i < count; i++) {
+        comments[i].id         = ids[i];
+        comments[i].author     = authors[i];
+        comments[i].body       = bodies[i];
+        comments[i].created_at = cats[i];
+    }
+
+    free(ids);
+    free(authors); free(bodies); free(cats);
+
+    *comments_out = comments;
+    *count_out = count;
+    return 0;
+}
+
+void board_free_comments(Comment *comments, int count)
+{
+    if (!comments) return;
+    for (int i = 0; i < count; i++) {
+        free(comments[i].author);
+        free(comments[i].body);
+        free(comments[i].created_at);
+    }
+    free(comments);
+}
+
+/* ------------------------------------------------------------------ */
 /* fuzzy_match: case-insensitive subsequence matching                 */
 /* ------------------------------------------------------------------ */
 

@@ -57,6 +57,14 @@ int   db_get_card_labels(db_t *db, int card_id, char ***names_out, int *count_ou
 /* M5: archive/unarchive and restore for undo */
 int   db_set_card_archived(db_t *db, int id, int archived);
 int   db_restore_card(db_t *db, int col, int id, const char *title,
-                     const char *desc, int archived);
+                      const char *desc, int archived);
+
+/* M7: comments */
+int   db_add_comment(db_t *db, int card_id, const char *author,
+                     const char *body);
+int   db_get_comments(db_t *db, int card_id,
+                      int **ids_out, char ***authors_out,
+                      char ***bodies_out, char ***created_ats_out,
+                      int *count_out);
 
 #endif

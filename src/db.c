@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#define SCHEMA_VERSION 1
+#define SCHEMA_VERSION 2
 
 /* portable strdup — POSIX strdup is not available under -std=c99 */
 static char *xstrdup(const char *s)
@@ -143,6 +143,41 @@ static int run_migrations(sqlite3 *conn)
             "INSERT OR IGNORE INTO columns (id, board_id, name, position) "
             "VALUES (3, 1, 'Done', 2);") != 0)
             return -1;
+    }
+
+    if (version < 2) {
+        /* M7a: task comments table */
+        if (exec_sql(conn, "BEGIN;") != 0) return -1;
+
+        if (exec_sql(conn,
+            "CREATE TABLE IF NOT EXISTS comments (\n"
+            "    id          INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+            "    card_id     INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,\n"
+            "    author      TEXT NOT NULL,\n"
+            "    body        TEXT NOT NULL,\n"
+            "    created_at  TEXT NOT NULL DEFAULT (datetime('now'))\n"
+            ");") != 0) {
+            exec_sql(conn, "ROLLBACK;");
+            return -1;
+        }
+
+        if (exec_sql(conn,
+            "CREATE INDEX IF NOT EXISTS idx_comments_card_id "
+            "ON comments(card_id);") != 0) {
+            exec_sql(conn, "ROLLBACK;");
+            return -1;
+        }
+
+        if (exec_sql(conn,
+            "INSERT INTO schema_migrations (version) VALUES (2);") != 0) {
+            exec_sql(conn, "ROLLBACK;");
+            return -1;
+        }
+
+        if (exec_sql(conn, "COMMIT;") != 0) {
+            exec_sql(conn, "ROLLBACK;");
+            return -1;
+        }
     }
 
     return 0;
@@ -835,6 +870,113 @@ int db_migrate_from_board(db_t *db, int next_id,
         exec_sql(db->conn, sql);
     }
 
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* M7: comments                                                        */
+/* ------------------------------------------------------------------ */
+
+int db_add_comment(db_t *db, int card_id, const char *author,
+                   const char *body)
+{
+    if (!db || !db->conn || !author || !body) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "INSERT INTO comments (card_id, author, body) VALUES (?, ?, ?)",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, card_id);
+    sqlite3_bind_text(stmt, 2, author, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, body, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc == SQLITE_DONE) {
+        /* update card's updated_at */
+        sqlite3_stmt *ust = NULL;
+        sqlite3_prepare_v2(db->conn,
+            "UPDATE cards SET updated_at = datetime('now') WHERE id = ?",
+            -1, &ust, NULL);
+        if (ust) {
+            sqlite3_bind_int(ust, 1, card_id);
+            sqlite3_step(ust);
+            sqlite3_finalize(ust);
+        }
+        return 0;
+    }
+    return -1;
+}
+
+int db_get_comments(db_t *db, int card_id,
+                    int **ids_out, char ***authors_out,
+                    char ***bodies_out, char ***created_ats_out,
+                    int *count_out)
+{
+    if (!db || !db->conn || !ids_out || !authors_out || !bodies_out ||
+        !created_ats_out || !count_out) return -1;
+
+    *ids_out = NULL;
+    *authors_out = NULL;
+    *bodies_out = NULL;
+    *created_ats_out = NULL;
+    *count_out = 0;
+
+    /* count first */
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "SELECT COUNT(*) FROM comments WHERE card_id = ?",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, card_id);
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    int count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    if (count == 0) return 0;
+
+    int *ids = malloc((size_t)count * sizeof(int));
+    char **authors = malloc((size_t)(count + 1) * sizeof(char *));
+    char **bodies  = malloc((size_t)(count + 1) * sizeof(char *));
+    char **cats    = malloc((size_t)(count + 1) * sizeof(char *));
+    if (!ids || !authors || !bodies || !cats) {
+        free(ids); free(authors); free(bodies); free(cats);
+        return -1;
+    }
+
+    rc = sqlite3_prepare_v2(db->conn,
+        "SELECT id, author, body, created_at FROM comments "
+        "WHERE card_id = ? ORDER BY created_at, id",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        free(ids); free(authors); free(bodies); free(cats);
+        return -1;
+    }
+    sqlite3_bind_int(stmt, 1, card_id);
+
+    int idx = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && idx < count) {
+        ids[idx] = sqlite3_column_int(stmt, 0);
+        const char *a = (const char *)sqlite3_column_text(stmt, 1);
+        const char *b = (const char *)sqlite3_column_text(stmt, 2);
+        const char *c = (const char *)sqlite3_column_text(stmt, 3);
+        authors[idx] = a ? xstrdup(a) : xstrdup("");
+        bodies[idx]  = b ? xstrdup(b) : xstrdup("");
+        cats[idx]    = c ? xstrdup(c) : xstrdup("");
+        idx++;
+    }
+    sqlite3_finalize(stmt);
+
+    *ids_out = ids;
+    *authors_out = authors;
+    *bodies_out = bodies;
+    *created_ats_out = cats;
+    *count_out = idx;
     return 0;
 }
 

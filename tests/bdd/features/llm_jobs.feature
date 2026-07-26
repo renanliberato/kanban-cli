@@ -12,8 +12,8 @@ Feature: LLM job subsystem
     And I press Ctrl+E
     Then I can still navigate with "j"
 
-  Scenario: Job completes and review screen appears
+  Scenario: Job completes and applies enrichment directly
     When I launch the application
     And I press Ctrl+E
     And I wait for the enrich job to complete
-    Then a review screen should appear
+    Then the card "Test title" should have a description

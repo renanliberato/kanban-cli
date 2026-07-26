@@ -889,45 +889,18 @@ def step_press_ctrl_e(context):
 
 @step("I wait for the enrich job to complete")
 def step_wait_enrich_job(context):
-    """Wait for the enrich job to finish and the review screen to appear."""
-    # With KANBAN_LLM_FAKE_DELAY=10 and the fake provider completing in 10 ticks,
-    # this should take about 1 second at 100ms per tick.
-    # Wait a bit more for safety.
+    """Wait for the enrich job to finish.
+       With KANBAN_LLM_FAKE_DELAY=10, the fake provider completes in ~1 second.
+       We wait up to 3 seconds for safety."""
     for _ in range(20):
         time.sleep(0.15)
-        # Check if review screen appeared
         try:
             chunk = context.child.read_nonblocking(size=65536, timeout=0.3)
             buf = getattr(context, "screen_buffer", "")
             context.screen_buffer = buf + chunk
         except Exception:
             pass
-        if "AI Enrich" in getattr(context, "screen_buffer", ""):
-            break
     assert context.child.isalive(), "Application should still be alive"
-
-
-@step("a review screen should appear")
-def step_review_screen_appears(context):
-    content = screen_content(context.child, context)
-    assert "AI Enrich" in content, \
-        f"Review screen should show 'AI Enrich'. Content:\n{content[-800:]}"
-
-
-@step("I confirm the enrichment")
-def step_confirm_enrichment(context):
-    """In the review screen, press 'c' to confirm."""
-    time.sleep(0.3)
-    context.child.send("c")
-    time.sleep(0.3)
-
-
-@step("I cancel the enrichment review")
-def step_cancel_enrichment(context):
-    """In the review screen, press ESC to cancel."""
-    time.sleep(0.3)
-    context.child.send("\033")
-    time.sleep(0.3)
 
 
 @step('the card "{title}" should have a description')
@@ -968,3 +941,11 @@ def step_card_no_description(context, title):
     if row is not None:
         desc = row[0] or ""
         assert desc == "", f"Expected no description for '{title}', got '{desc}'"
+
+
+@step('the screen should contain "{text}"')
+def step_screen_contains(context, text):
+    """Check that the current screen buffer contains the given text."""
+    content = screen_content(context.child, context)
+    assert text in content, \
+        f"Screen should contain '{text}'. Content:\n{content[-800:]}"

@@ -22,7 +22,7 @@ static int is_subcommand(const char *arg)
 {
     static const char *subs[] = {
         "add", "list", "show", "enrich", "move",
-        "list-boards", NULL
+        "list-boards", "comment", NULL
     };
     for (int i = 0; subs[i]; i++) {
         if (strcmp(arg, subs[i]) == 0) return 1;
@@ -325,6 +325,20 @@ static int cmd_show(const Board *b, int argc, char **argv, int subcmd_idx)
     printf("Updated:     %s\n", card->updated_at ? card->updated_at : "unknown");
     printf("Archived:    %s\n", card->archived ? "yes" : "no");
 
+    /* comments */
+    Comment *comments = NULL;
+    int comment_count = 0;
+    if (board_get_comments((Board *)b, id, &comments, &comment_count) == 0 && comment_count > 0) {
+        printf("Comments:    %d\n\n", comment_count);
+        for (int i = 0; i < comment_count; i++) {
+            printf("  %s · %s\n", comments[i].author, comments[i].created_at);
+            printf("  %s\n\n", comments[i].body);
+        }
+    } else {
+        printf("Comments:    (none)\n");
+    }
+    board_free_comments(comments, comment_count);
+
     return 0;
 }
 
@@ -446,6 +460,45 @@ static int cmd_move(Board *b, int argc, char **argv, int subcmd_idx)
     return 0;
 }
 
+static int cmd_comment(Board *b, int argc, char **argv, int subcmd_idx)
+{
+    if (subcmd_idx + 2 >= argc) {
+        fprintf(stderr, "Usage: kanban comment <id> \"text\"\n");
+        return 1;
+    }
+
+    int id = atoi(argv[subcmd_idx + 1]);
+    const char *body = argv[subcmd_idx + 2];
+
+    if (!body || !body[0]) {
+        fprintf(stderr, "kanban: comment text cannot be empty\n");
+        return 1;
+    }
+
+    /* Check card exists */
+    Card *card = board_get_card(b, id);
+    if (!card) {
+        fprintf(stderr, "kanban: card %d not found\n", id);
+        return 1;
+    }
+
+    /* Determine author */
+    const char *author = getenv("USER");
+    if (!author || !author[0]) author = "me";
+
+    int rc = board_add_comment(b, id, author, body);
+    if (rc != 0) {
+        fprintf(stderr, "kanban: failed to add comment to card %d\n", id);
+        return 1;
+    }
+
+    /* Print the new comment id (we don't have it easily — board_add_comment
+       doesn't return the id, but the operation succeeded). Print card id for
+       scriptability. */
+    printf("%d\n", id);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
@@ -526,6 +579,8 @@ int main(int argc, char **argv)
         ret = cmd_enrich(&b, argc, argv, subcmd_idx);
     } else if (strcmp(subcmd, "move") == 0) {
         ret = cmd_move(&b, argc, argv, subcmd_idx);
+    } else if (strcmp(subcmd, "comment") == 0) {
+        ret = cmd_comment(&b, argc, argv, subcmd_idx);
     } else {
         fprintf(stderr, "kanban: unknown subcommand '%s'\n", subcmd);
         ret = 1;

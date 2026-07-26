@@ -310,6 +310,170 @@ static void test_db_add_and_get_labels(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* comment tests                                                       */
+/* ------------------------------------------------------------------ */
+
+static void test_comments_add_and_get(void)
+{
+    const char *path = "/tmp/test_db_comments.db";
+    cleanup(path);
+
+    db_t *db = db_open(path);
+    ASSERT_NOTNULL(db, "comments: db_open ok");
+
+    /* Add a card */
+    ASSERT_EQ(db_add_card(db, 0, 1, "card1"), 0, "comments: card added");
+
+    /* Add comments */
+    ASSERT_EQ(db_add_comment(db, 1, "alice", "first comment"), 0,
+              "comments: first comment added");
+    ASSERT_EQ(db_add_comment(db, 1, "bob", "second comment"), 0,
+              "comments: second comment added");
+
+    /* Get comments */
+    int *ids = NULL;
+    char **authors = NULL;
+    char **bodies = NULL;
+    char **cats = NULL;
+    int count = 0;
+
+    ASSERT_EQ(db_get_comments(db, 1, &ids, &authors, &bodies, &cats, &count),
+              0, "comments: get comments ok");
+    ASSERT_EQ(count, 2, "comments: 2 comments");
+
+    ASSERT_STREQ(authors[0], "alice", "comments: first author");
+    ASSERT_STREQ(bodies[0], "first comment", "comments: first body");
+    ASSERT_NOTNULL(cats[0], "comments: first created_at");
+    ASSERT_STREQ(authors[1], "bob", "comments: second author");
+    ASSERT_STREQ(bodies[1], "second comment", "comments: second body");
+
+    for (int i = 0; i < count; i++) {
+        free(authors[i]); free(bodies[i]); free(cats[i]);
+    }
+    free(ids); free(authors); free(bodies); free(cats);
+
+    db_close(db);
+    cleanup(path);
+}
+
+static void test_comments_delete_cascade(void)
+{
+    const char *path = "/tmp/test_db_comments_cascade.db";
+    cleanup(path);
+
+    db_t *db = db_open(path);
+    ASSERT_NOTNULL(db, "comments cascade: db_open ok");
+
+    /* Add card + comment */
+    ASSERT_EQ(db_add_card(db, 0, 1, "card1"), 0, "comments cascade: card added");
+    ASSERT_EQ(db_add_comment(db, 1, "alice", "hello"), 0,
+              "comments cascade: comment added");
+
+    /* Verify comment exists */
+    int count = 0;
+    ASSERT_EQ(db_get_comments(db, 1, NULL, NULL, NULL, NULL, &count),
+              -1, "comments cascade: get with NULL args returns error"); 
+    /* Actually let's do a proper check with valid args */
+    {
+        int *ids = NULL;
+        char **authors = NULL;
+        char **bodies = NULL;
+        char **cats = NULL;
+        ASSERT_EQ(db_get_comments(db, 1, &ids, &authors, &bodies, &cats, &count),
+                  0, "comments cascade: get comments ok");
+        ASSERT_EQ(count, 1, "comments cascade: 1 comment before delete");
+        for (int i = 0; i < count; i++) {
+            free(authors[i]); free(bodies[i]); free(cats[i]);
+        }
+        free(ids); free(authors); free(bodies); free(cats);
+    }
+
+    /* Delete card — FK ON DELETE CASCADE should remove comment */
+    ASSERT_EQ(db_delete_card(db, 1), 0, "comments cascade: card deleted");
+
+    /* Verify no comments remain */
+    {
+        int *ids = NULL;
+        char **authors = NULL;
+        char **bodies = NULL;
+        char **cats = NULL;
+        int count2 = 0;
+        ASSERT_EQ(db_get_comments(db, 1, &ids, &authors, &bodies, &cats, &count2),
+                  0, "comments cascade: get after delete");
+        ASSERT_EQ(count2, 0, "comments cascade: 0 comments after delete");
+        free(ids); free(authors); free(bodies); free(cats);
+    }
+
+    db_close(db);
+    cleanup(path);
+}
+
+static void test_comments_empty_card(void)
+{
+    const char *path = "/tmp/test_db_comments_empty.db";
+    cleanup(path);
+
+    db_t *db = db_open(path);
+    ASSERT_NOTNULL(db, "comments empty: db_open ok");
+
+    /* Get comments for non-existent card */
+    {
+        int *ids = NULL;
+        char **authors = NULL;
+        char **bodies = NULL;
+        char **cats = NULL;
+        int count = 0;
+        ASSERT_EQ(db_get_comments(db, 999, &ids, &authors, &bodies, &cats, &count),
+                  0, "comments empty: get for missing card returns 0");
+        ASSERT_EQ(count, 0, "comments empty: 0 comments for missing card");
+        free(ids); free(authors); free(bodies); free(cats);
+    }
+
+    db_close(db);
+    cleanup(path);
+}
+
+static void test_comments_schema_v2_migration(void)
+{
+    const char *path = "/tmp/test_db_schema_v2.db";
+    cleanup(path);
+
+    db_t *db = db_open(path);
+    ASSERT_NOTNULL(db, "schema v2: db_open ok");
+    ASSERT_TRUE(db_has_migration(db, 1), "schema v2: v1 recorded");
+    ASSERT_TRUE(db_has_migration(db, 2), "schema v2: v2 recorded");
+
+    /* Verify comments table exists by adding a comment */
+    ASSERT_EQ(db_add_card(db, 0, 1, "card1"), 0, "schema v2: card added");
+    ASSERT_EQ(db_add_comment(db, 1, "tester", "test comment"), 0,
+              "schema v2: comment added (table exists)");
+
+    /* Verify data survives reopen */
+    db_close(db);
+
+    db = db_open(path);
+    ASSERT_NOTNULL(db, "schema v2: reopen ok");
+
+    int *ids = NULL;
+    char **authors = NULL;
+    char **bodies = NULL;
+    char **cats = NULL;
+    int count = 0;
+    ASSERT_EQ(db_get_comments(db, 1, &ids, &authors, &bodies, &cats, &count),
+              0, "schema v2: get comments after reopen");
+    ASSERT_EQ(count, 1, "schema v2: comment persisted");
+    ASSERT_STREQ(authors[0], "tester", "schema v2: author persisted");
+
+    for (int i = 0; i < count; i++) {
+        free(authors[i]); free(bodies[i]); free(cats[i]);
+    }
+    free(ids); free(authors); free(bodies); free(cats);
+
+    db_close(db);
+    cleanup(path);
+}
+
+/* ------------------------------------------------------------------ */
 
 int main(void)
 {
@@ -321,6 +485,10 @@ int main(void)
     test_crud_roundtrip();
     test_reopen_persistence();
     test_db_add_and_get_labels();
+    test_comments_add_and_get();
+    test_comments_delete_cascade();
+    test_comments_empty_card();
+    test_comments_schema_v2_migration();
 
     printf("\n---\n%d tests: %d passed, %d failed\n",
            tests_run, tests_pass, tests_fail);

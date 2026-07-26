@@ -32,7 +32,8 @@ Read this first after any context compaction. PLAN.md has the full plan.
 
 - [x] Iteration 3 M5: Adaptive layout + undo + archive
 - [x] Iteration 3 M6: Background jobs polish + multiple boards
-- [ ] Iteration 3 M7: Comments + agent primitives; review flow removal (backlog)
+- [x] Iteration 3 M7a: Task comments + remove enrich review screen
+- [ ] Iteration 3 M7b: Agent config files + @mention triggers (backlog)
 
 ## Git log so far
 - `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)
@@ -46,6 +47,8 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - `5de7547` Iter3 M3: CLI subcommands + AI enrich with human review
 - `2f58d86` Iter3 M4: card detail view, label picker, fuzzy filter
 - `2eecd9e` Iter3 M5: adaptive narrow layout, undo, archive (17 files, +2358/-196 lines)
+- `dbdf63c` Iter3 M6: background job polish + multiple named boards
+- `237aa6a` Iter3 M7a: task comments, schema v2, remove enrich review screen
 
 ## Notes for minions
 - All builds/tests/e2e MUST run on the box, not locally.
