@@ -6,11 +6,27 @@ Read this first after any context compaction. PLAN.md has the full plan.
 
 All 3 iterations delivered and verified. The project is feature-complete.
 
-- **Unit tests:** 386 assertions (board, db, llm, board_path, agent, undo)
-- **BDD suite:** 71 scenarios, 19 features, ~400 steps (behave/gherkin/pexpect)
+- **Unit tests:** 386 assertions (105 board, 88 db, 81 llm, 28 undo, 22 board_path, 62 agent)
+- **BDD suite:** 75 scenarios (+4 from iter4b), 19 features, 449 steps (behave/gherkin/pexpect)
 - **Build:** `-Wall -Wextra -std=c99`, zero warnings on gcc 13.3
 - **Reports:** `BOX_REPORT.md` (box usage), `BDD_REPORT.md` (BDD testing methodology)
 - **Verification:** `bash scripts/verify.sh` — clean build + unit tests + BDD
+- **Shipped agents:** 8 planning agents in `agents/` (6 comment, 2 description) with README docs
+
+## Agents
+
+8 shipped planning agents (`agents/*.md`), installed with `cp agents/*.md ~/.kanban/agents/`:
+
+| Agent | Type | Role |
+|-------|------|------|
+| `analyst` | comment | Analytics/tracking coverage review |
+| `pm` | comment | Product lens — challenges weak framing |
+| `planner` | comment | Ordered implementation plan with dependencies |
+| `risk` | comment | Risk assessment — failure modes, edge cases, LxI ratings |
+| `scope` | comment | MVP cut — essential vs. deferrable |
+| `ux` | comment | UX review — end-to-end flow, missing states, accessibility |
+| `writer` | description | Full spec rewrite incorporating thread decisions |
+| `groom` | description | Conservative update — folds thread conclusions into description |
 
 ## Environment
 
@@ -19,11 +35,11 @@ All 3 iterations delivered and verified. The project is feature-complete.
   prefix commands with `export PATH="$HOME/.ascii/bin:$PATH"`)
 - box account: authenticated, Trial plan
 
-## Box (STOPPED as of 2026-07-25, end of iteration 3)
+## Box (RUNNING as of 2026-07-26, iter4b verification; STOP after commit)
 
 - Box ID: bx_8rz2mckf
-- Box stopped via `box stop bx_8rz2mckf` (snapshot preserved).
 - Resume with: `box resume bx_8rz2mckf`
+- Stop with: `box stop bx_8rz2mckf`
 - Sync command (suggested):
   `tar czf - --exclude=.git . | box ssh <ID> "mkdir -p ~/kanban-cli && tar xzf - -C ~/kanban-cli"`
 - Verify command: `box ssh <ID> "cd ~/kanban-cli && bash scripts/verify.sh"`
@@ -52,6 +68,7 @@ All 3 iterations delivered and verified. The project is feature-complete.
 - [x] BOX_REPORT.md written
 - [x] BDD_REPORT.md written
 - [x] Box stopped (bx_8rz2mckf)
+- [x] Iter4b: shipped 8 planning agents (6 comment, 2 description), README agents section, shipped-agent BDD scenarios, multi-line wrap_text fix
 
 ## Git Log (Complete)
 
@@ -71,6 +88,8 @@ All 3 iterations delivered and verified. The project is feature-complete.
 - `e90b7fb` Iter3 M7a: task comments, schema v2, remove enrich review screen
 - `31e6c85` Iter3 M7b: agent primitives — markdown-defined agents triggered via @mentions in comments
 - `8fe18e3` Add BDD testing report
+- `9bf71aa` Iter4a: remove broken enrich feature
+- `bb51740` Iter4b: ship 8 planning agents (comment + description), README agents section, shipped-agent BDD
 
 ## Notes for minions
 
