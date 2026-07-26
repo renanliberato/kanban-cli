@@ -45,6 +45,7 @@ static TuiState    state;
 static int         has_color = 0;
 static const char *g_save_path = NULL;
 static Board      *g_board = NULL;  /* kept for review-mode access */
+static const char *g_board_name = NULL;  /* display name for title bar */
 
 /* flash message: shown briefly in the status bar after an event */
 static char   g_flash_buf[128];
@@ -277,6 +278,17 @@ static void draw_card(int y, int x, const char *title, int width, int selected,
 
     int is_archived = card ? card->archived : 0;
 
+    /* Check if this card has a running LLM job */
+    int has_job = 0;
+    char job_spinner = ' ';
+    if (card) {
+        const LlmJob *j = llm_get_job_for_card(card->id);
+        if (j) {
+            has_job = 1;
+            job_spinner = g_spinner_chars[g_spinner_idx % 4];
+        }
+    }
+
     move(y, x);
     if (selected && has_color)
         attron(COLOR_PAIR(PAIR_SELECTED));
@@ -288,6 +300,12 @@ static void draw_card(int y, int x, const char *title, int width, int selected,
         attron(A_DIM);
 
     addch(' ');
+
+    /* Job indicator spinner */
+    if (has_job) {
+        addch((unsigned char)job_spinner);
+        usable--;
+    }
 
     if (is_archived) {
         /* prepend "[archived] " prefix — but only if we have space */
@@ -542,12 +560,19 @@ static void draw_status_bar(int rows)
 
         char left[128] = "";
         int left_len = 0;
+
+        /* Board name first */
+        if (g_board_name && g_board_name[0]) {
+            left_len = snprintf(left, sizeof(left), "[%s]  ", g_board_name);
+        }
+
         if (running_count > 0) {
             char sp = g_spinner_chars[g_spinner_idx % 4];
-            left_len = snprintf(left, sizeof(left),
-                                " %c %d job%s running  ",
-                                sp, running_count,
-                                running_count == 1 ? "" : "s");
+            int n = snprintf(left + left_len, sizeof(left) - (size_t)left_len,
+                             " %c %d job%s running  ",
+                             sp, running_count,
+                             running_count == 1 ? "" : "s");
+            if (n > 0) left_len += n;
         }
 
         /* show filter indicator if active */
@@ -1370,11 +1395,18 @@ static void draw_narrow_view(const Board *board)
 
         char left[128] = "";
         int left_len = 0;
+
+        /* Board name first */
+        if (g_board_name && g_board_name[0]) {
+            left_len = snprintf(left, sizeof(left), "[%s]  ", g_board_name);
+        }
+
         if (running_count > 0) {
             char sp = g_spinner_chars[g_spinner_idx % 4];
-            left_len = snprintf(left, sizeof(left),
-                                " %c %d job%s running  ", sp, running_count,
-                                running_count == 1 ? "" : "s");
+            int n = snprintf(left + left_len, sizeof(left) - (size_t)left_len,
+                             "%c %d job%s running  ", sp, running_count,
+                             running_count == 1 ? "" : "s");
+            if (n > 0) left_len += n;
         }
         if (g_filter_len > 0) {
             int n = snprintf(left + left_len, sizeof(left) - (size_t)left_len,
@@ -1679,13 +1711,35 @@ static void submit_enrich_job(Board *board, int card_id)
     char *prompt = enrich_build_prompt(card->title, card->description);
     if (!prompt) return;
 
-    int job_id = llm_submit(prompt, card_id, 60);
+    /* Check job queue capacity before submitting */
+    if (llm_job_count() >= 3) {
+        /* Count running jobs */
+        int running = 0;
+        for (int i = 0; i < llm_job_count(); i++) {
+            const LlmJob *j = llm_job_at(i);
+            if (j && (j->state == LLM_RUNNING || j->state == LLM_QUEUED))
+                running++;
+        }
+        if (running >= 3) {
+            snprintf(g_flash_buf, sizeof(g_flash_buf),
+                     "Job queue full (max 3)");
+            g_flash_until = time(NULL) + FLASH_DURATION;
+            free(prompt);
+            return;
+        }
+    }
+
+    int job_id = llm_submit(prompt, card_id, 0);  /* 0 = use default timeout */
     free(prompt);
 
     if (job_id >= 0) {
         g_enrich_job_id = job_id;
         snprintf(g_flash_buf, sizeof(g_flash_buf),
                  "Enriching card #%d...", card_id);
+        g_flash_until = time(NULL) + FLASH_DURATION;
+    } else {
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Job queue full (max 3)");
         g_flash_until = time(NULL) + FLASH_DURATION;
     }
 }
@@ -2075,6 +2129,21 @@ static int handle_input(Board *board, int ch)
         return 1;
     }
 
+    /* 'K': cancel/kill LLM job on selected card */
+    if (ch == 'K') {
+        int card_id;
+        if (get_selected_card(board, &card_id) == 0) {
+            const LlmJob *j = llm_get_job_for_card(card_id);
+            if (j) {
+                llm_cancel(j->id);
+                snprintf(g_flash_buf, sizeof(g_flash_buf),
+                         "Job cancelled");
+                g_flash_until = time(NULL) + FLASH_DURATION;
+            }
+        }
+        return 1;
+    }
+
     /* Undo: 'u' */
     if (ch == 'u') {
         UndoOp op;
@@ -2401,8 +2470,16 @@ static void check_enrich_completion(void)
     }
 
     if (job->state == LLM_FAILED || job->state == LLM_CANCELLED) {
-        snprintf(g_flash_buf, sizeof(g_flash_buf),
-                 "Enrich job failed");
+        if (job->state == LLM_FAILED && job->result && job->result[0]) {
+            snprintf(g_flash_buf, sizeof(g_flash_buf),
+                     "Enrich job failed: %s", job->result);
+        } else if (job->state == LLM_CANCELLED) {
+            snprintf(g_flash_buf, sizeof(g_flash_buf),
+                     "Enrich job cancelled");
+        } else {
+            snprintf(g_flash_buf, sizeof(g_flash_buf),
+                     "Enrich job failed");
+        }
         g_flash_until = time(NULL) + FLASH_DURATION;
         g_enrich_job_id = -1;
         return;
@@ -2449,12 +2526,13 @@ static void check_enrich_completion(void)
 /* public api                                                         */
 /* ------------------------------------------------------------------ */
 
-int tui_run(Board *board, const char *save_path)
+int tui_run(Board *board, const char *save_path, const char *board_name)
 {
     if (!board) return -1;
 
     g_save_path = save_path;
     g_board = board;
+    g_board_name = board_name;
 
     state.sel_col  = 0;
     state.sel_card = col_visible_count(board, 0) > 0 ? 0 : -1;
@@ -2510,7 +2588,10 @@ int tui_run(Board *board, const char *save_path)
                     SET_FLASH("Job #%d done (card #%d)",
                               j->id, j->card_id);
                 } else if (j->state == LLM_FAILED) {
-                    SET_FLASH("Job #%d failed", j->id);
+                    if (j->result && j->result[0])
+                        SET_FLASH("Job #%d failed: %s", j->id, j->result);
+                    else
+                        SET_FLASH("Job #%d failed", j->id);
                 } else if (j->state == LLM_CANCELLED) {
                     SET_FLASH("Job #%d cancelled", j->id);
                 }

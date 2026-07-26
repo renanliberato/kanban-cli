@@ -389,6 +389,116 @@ static void test_provider_selection(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* test: default timeout from env var                                  */
+/* ------------------------------------------------------------------ */
+
+static void test_default_timeout(void)
+{
+    /* Default (no env var) should be 120 */
+    unsetenv("KANBAN_LLM_TIMEOUT");
+    int def = llm_default_timeout();
+    ASSERT_EQ(def, 120, "default timeout is 120");
+
+    /* Set env var */
+    setenv("KANBAN_LLM_TIMEOUT", "30", 1);
+    def = llm_default_timeout();
+    ASSERT_EQ(def, 30, "timeout from env var is 30");
+
+    /* Invalid value */
+    setenv("KANBAN_LLM_TIMEOUT", "invalid", 1);
+    def = llm_default_timeout();
+    ASSERT_EQ(def, 120, "invalid timeout falls back to 120");
+
+    /* Negative value */
+    setenv("KANBAN_LLM_TIMEOUT", "-5", 1);
+    def = llm_default_timeout();
+    ASSERT_EQ(def, 120, "negative timeout falls back to 120");
+
+    /* Zero value */
+    setenv("KANBAN_LLM_TIMEOUT", "0", 1);
+    def = llm_default_timeout();
+    ASSERT_EQ(def, 120, "zero timeout falls back to 120");
+
+    unsetenv("KANBAN_LLM_TIMEOUT");
+}
+
+/* ------------------------------------------------------------------ */
+/* test: llm_get_job_for_card                                          */
+/* ------------------------------------------------------------------ */
+
+static void test_get_job_for_card(void)
+{
+    setenv("KANBAN_LLM_FAKE_DELAY", "100", 1);
+    llm_init();
+
+    /* Card -1 should return NULL */
+    ASSERT_NULL(llm_get_job_for_card(-1), "job_for_card: -1 returns NULL");
+
+    /* Submit jobs for different cards */
+    int id1 = llm_submit("card 1 job", 10, 0);
+    int id2 = llm_submit("card 2 job", 20, 0);
+    ASSERT_NEQ(id1, -1, "job_for_card: job 1 submitted");
+    ASSERT_NEQ(id2, -1, "job_for_card: job 2 submitted");
+
+    const LlmJob *j1 = llm_get_job_for_card(10);
+    ASSERT_NOTNULL(j1, "job_for_card: finds job for card 10");
+    ASSERT_EQ(j1->card_id, 10, "job_for_card: card_id matches");
+
+    const LlmJob *j2 = llm_get_job_for_card(20);
+    ASSERT_NOTNULL(j2, "job_for_card: finds job for card 20");
+    ASSERT_EQ(j2->card_id, 20, "job_for_card: card_id matches");
+
+    /* No job for card 99 */
+    ASSERT_NULL(llm_get_job_for_card(99), "job_for_card: card 99 returns NULL");
+
+    /* Clean up */
+    llm_cancel(id1);
+    llm_cancel(id2);
+    llm_poll();
+    llm_free();
+    unsetenv("KANBAN_LLM_FAKE_DELAY");
+}
+
+/* ------------------------------------------------------------------ */
+/* test: job queue full rejection with cap check                       */
+/* ------------------------------------------------------------------ */
+
+static void test_job_queue_full_cap(void)
+{
+    /* Verify that max 3 jobs are accepted and 4th is rejected */
+    setenv("KANBAN_LLM_FAKE_DELAY", "100", 1);
+    llm_init();
+
+    int id1 = llm_submit("job 1", 1, 0);
+    int id2 = llm_submit("job 2", 2, 0);
+    int id3 = llm_submit("job 3", 3, 0);
+    ASSERT_NEQ(id1, -1, "cap: job 1 accepted");
+    ASSERT_NEQ(id2, -1, "cap: job 2 accepted");
+    ASSERT_NEQ(id3, -1, "cap: job 3 accepted");
+
+    /* 4th should be rejected */
+    int id4 = llm_submit("job 4", 4, 0);
+    ASSERT_EQ(id4, -1, "cap: job 4 rejected (queue full)");
+
+    ASSERT_EQ(llm_job_count(), 3, "cap: job count is 3 after 4 submits");
+
+    /* Cancel one and try again */
+    llm_cancel(id1);
+    llm_poll();
+    ASSERT_EQ(llm_get_job(id1)->state, LLM_CANCELLED, "cap: job 1 cancelled");
+
+    /* Now submit again — should succeed since slot is freed */
+    llm_free();
+    llm_init();
+
+    int id5 = llm_submit("job 5", 5, 0);
+    ASSERT_NEQ(id5, -1, "cap: job 5 accepted (slot freed)");
+
+    llm_free();
+    unsetenv("KANBAN_LLM_FAKE_DELAY");
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -410,6 +520,9 @@ int main(void)
     test_multiple_jobs();
     test_job_at();
     test_provider_selection();
+    test_default_timeout();
+    test_get_job_for_card();
+    test_job_queue_full_cap();
 
     printf("\n---\n");
     printf("Tests run:  %d\n", tests_run);

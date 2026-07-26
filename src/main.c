@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE    /* for usleep on Linux */
 #include "board.h"
+#include "board_path.h"
 #include "tui.h"
 #include "llm.h"
 #include "enrich.h"
@@ -17,22 +18,12 @@
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-static char *default_board_path(void)
-{
-    const char *home = getenv("HOME");
-    if (!home) return NULL;
-
-    size_t len  = strlen(home) + strlen("/.kanban/default.db") + 1;
-    char  *path = malloc(len);
-    if (!path) return NULL;
-
-    snprintf(path, len, "%s/.kanban/default.db", home);
-    return path;
-}
-
 static int is_subcommand(const char *arg)
 {
-    static const char *subs[] = {"add", "list", "show", "enrich", "move", NULL};
+    static const char *subs[] = {
+        "add", "list", "show", "enrich", "move",
+        "list-boards", NULL
+    };
     for (int i = 0; subs[i]; i++) {
         if (strcmp(arg, subs[i]) == 0) return 1;
     }
@@ -62,41 +53,104 @@ static const char *col_name(int col)
 /* resolve path + subcommand from argv                                */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Parse argv for board_name (-b/--board), explicit path, and subcommand.
+ * Precedence: explicit path > -b name > discovery > ~/.kanban/default.db
+ *
+ * Sets *board_name_out to the -b value (NULL if not given).
+ * Sets *subcmd_idx to the index of the subcommand (-1 if none).
+ * Returns 0 for TUI mode, 1 for CLI mode (including list-boards).
+ * Returns -1 on error (HOME not set).
+ * In CLI mode, the resolved path is stored in *path_out (malloc'd).
+ */
 static int resolve_args(int argc, char **argv,
-                        const char **path_out, char **allocated_out,
+                        char **path_out, char **board_name_out,
                         int *subcmd_idx)
 {
-    *subcmd_idx = -1;
-    *allocated_out = NULL;
+    *subcmd_idx      = -1;
+    *path_out        = NULL;
+    *board_name_out  = NULL;
+    const char *explicit_path = NULL;
 
-    if (argc <= 1) {
-        /* no arguments → TUI mode with default path */
-        *allocated_out = default_board_path();
-        *path_out = *allocated_out;
-        if (!*path_out) { fprintf(stderr, "kanban: HOME not set\n"); return -1; }
-        return 0;  /* TUI mode */
+    /* First pass: find -b/--board, explicit path, and subcommand index.
+       We parse left-to-right.  -b/--board sets board_name.
+       The first positional that is NOT a subcommand is the explicit path.
+       The first positional that IS a subcommand sets subcmd_idx. */
+    int i = 1;
+    while (i < argc) {
+        if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--board") == 0) {
+            if (i + 1 < argc) {
+                free(*board_name_out);
+                *board_name_out = strdup(argv[i + 1]);
+                i += 2;
+                continue;
+            } else {
+                fprintf(stderr, "kanban: -b/--board requires a name\n");
+                return -1;
+            }
+        }
+
+        if (argv[i][0] == '-') {
+            /* unknown flag — skip for now (subcommand handlers parse their own) */
+            i++;
+            continue;
+        }
+
+        if (is_subcommand(argv[i])) {
+            *subcmd_idx = i;
+            break;  /* subcommand ends our scan */
+        }
+
+        /* Positional arg that's not a subcommand — explicit path */
+        if (!explicit_path)
+            explicit_path = argv[i];
+        i++;
     }
 
-    /* Check if argv[1] is a subcommand */
-    if (is_subcommand(argv[1])) {
-        *subcmd_idx = 1;
-        *allocated_out = default_board_path();
-        *path_out = *allocated_out;
-        if (!*path_out) { fprintf(stderr, "kanban: HOME not set\n"); return -1; }
+    /* Resolve the board path */
+    if (*subcmd_idx >= 0 && strcmp(argv[*subcmd_idx], "list-boards") == 0) {
+        /* list-boards doesn't need a board path */
+        *path_out = NULL;
         return 1;  /* CLI mode */
     }
 
-    /* argv[1] might be a path or a subcommand */
-    if (argc >= 3 && is_subcommand(argv[2])) {
-        /* argv[1] is path, argv[2] is subcommand */
-        *path_out = argv[1];
-        *subcmd_idx = 2;
-        return 1;  /* CLI mode */
+    *path_out = board_path_resolve(explicit_path, *board_name_out);
+    if (!*path_out) {
+        fprintf(stderr, "kanban: failed to resolve board path\n");
+        return -1;
     }
 
-    /* Otherwise argv[1] is the board path (TUI mode) */
-    *path_out = argv[1];
+    if (*subcmd_idx >= 0)
+        return 1;  /* CLI mode */
+
     return 0;  /* TUI mode */
+}
+
+/* ------------------------------------------------------------------ */
+/* list-boards subcommand                                             */
+/* ------------------------------------------------------------------ */
+
+static int cmd_list_boards(void)
+{
+    int count = 0;
+    BoardInfo *boards = board_path_list(&count);
+
+    if (!boards || count == 0) {
+        printf("No boards found.\n");
+        free(boards);
+        return 0;
+    }
+
+    for (int i = 0; i < count; i++) {
+        printf("%s", boards[i].display_name);
+        if (boards[i].card_count >= 0)
+            printf("  (%d cards)", boards[i].card_count);
+        printf("  [%s]\n", boards[i].path);
+        free(boards[i].path);
+        free(boards[i].display_name);
+    }
+    free(boards);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -167,7 +221,7 @@ static int cmd_add(Board *b, int argc, char **argv, int subcmd_idx)
         if (!prompt) {
             fprintf(stderr, "kanban: failed to build enrich prompt\n");
         } else {
-            int job_id = llm_submit(prompt, id, 60);
+            int job_id = llm_submit(prompt, id, 0);  /* 0 = use default timeout */
             free(prompt);
 
             if (job_id < 0) {
@@ -206,10 +260,6 @@ static int cmd_add(Board *b, int argc, char **argv, int subcmd_idx)
 
     /* Print the new card id */
     printf("%d\n", id);
-
-    /* Save the board */
-    /* We need to open a db handle if not already present.
-       board_save needs a path, use the default_db_path concept. */
     return 0;
 }
 
@@ -300,11 +350,11 @@ static int cmd_enrich(Board *b, int argc, char **argv, int subcmd_idx)
         return 1;
     }
 
-    int job_id = llm_submit(prompt, id, 60);
+    int job_id = llm_submit(prompt, id, 0);  /* 0 = use default timeout */
     free(prompt);
 
     if (job_id < 0) {
-        fprintf(stderr, "kanban: failed to submit enrich job\n");
+        fprintf(stderr, "kanban: failed to submit enrich job (queue full?)\n");
         return 1;
     }
 
@@ -321,8 +371,16 @@ static int cmd_enrich(Board *b, int argc, char **argv, int subcmd_idx)
 
     const LlmJob *job = llm_get_job(job_id);
     if (!job || job->state != LLM_DONE || !job->result) {
-        fprintf(stderr, "kanban: enrich job failed (%s)\n",
-                job ? (job->state == LLM_FAILED ? "timeout/error" : "cancelled") : "unknown");
+        const char *reason = "unknown";
+        if (job) {
+            if (job->state == LLM_FAILED && job->result && job->result[0])
+                reason = job->result;
+            else if (job->state == LLM_FAILED)
+                reason = "timeout/error";
+            else if (job->state == LLM_CANCELLED)
+                reason = "cancelled";
+        }
+        fprintf(stderr, "kanban: enrich job failed (%s)\n", reason);
         return 1;
     }
 
@@ -394,15 +452,25 @@ static int cmd_move(Board *b, int argc, char **argv, int subcmd_idx)
 
 int main(int argc, char **argv)
 {
-    const char *path   = NULL;
-    char       *allocated_path = NULL;
-    int         subcmd_idx     = -1;
+    char *path       = NULL;
+    char *board_name = NULL;
+    int   subcmd_idx = -1;
 
-    int mode = resolve_args(argc, argv, &path, &allocated_path, &subcmd_idx);
+    int mode = resolve_args(argc, argv, &path, &board_name, &subcmd_idx);
 
     if (mode < 0) {
-        free(allocated_path);
+        free(path);
+        free(board_name);
         return 1;
+    }
+
+    /* list-boards is special — no board needed */
+    if (mode == 1 && subcmd_idx >= 0 &&
+        strcmp(argv[subcmd_idx], "list-boards") == 0) {
+        int ret = cmd_list_boards();
+        free(path);
+        free(board_name);
+        return ret;
     }
 
     if (mode == 0) {
@@ -416,17 +484,22 @@ int main(int argc, char **argv)
         if (board_load(&b, path) != 0) {
             fprintf(stderr, "kanban: failed to load board from '%s'\n", path);
             board_free(&b);
-            free(allocated_path);
+            free(path);
+            free(board_name);
             return 1;
         }
 
         llm_init();
 
-        int ret = tui_run(&b, path);
+        /* Derive a display name for the board */
+        char *display_name = board_name ? board_name : board_path_display_name(path);
+        int ret = tui_run(&b, path, display_name);
 
+        free(display_name);
         llm_free();
         board_free(&b);
-        free(allocated_path);
+        free(path);
+        free(board_name);
         return ret;
     }
 
@@ -435,7 +508,8 @@ int main(int argc, char **argv)
     if (board_load(&b, path) != 0) {
         fprintf(stderr, "kanban: failed to load board from '%s'\n", path);
         board_free(&b);
-        free(allocated_path);
+        free(path);
+        free(board_name);
         return 1;
     }
 
@@ -460,6 +534,7 @@ int main(int argc, char **argv)
     /* Save the board after CLI operations */
     board_save(&b, path);
     board_free(&b);
-    free(allocated_path);
+    free(path);
+    free(board_name);
     return ret;
 }

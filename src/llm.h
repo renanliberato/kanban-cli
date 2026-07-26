@@ -78,6 +78,14 @@ int  llm_job_count(void);
    Order is insertion order; the array is not compacted eagerly. */
 const LlmJob *llm_job_at(int index);
 
+/* Find a running (or queued) job associated with a card.
+   Returns the job pointer, or NULL if no job is running for that card. */
+const LlmJob *llm_get_job_for_card(int card_id);
+
+/* Return the default timeout in seconds (from KANBAN_LLM_TIMEOUT env var,
+   or 120 if not set). */
+int  llm_default_timeout(void);
+
 /* ------------------------------------------------------------------ */
 /* provider hook (internal, swapped for testing)                      */
 /* ------------------------------------------------------------------ */

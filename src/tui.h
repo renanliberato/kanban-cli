@@ -11,8 +11,9 @@ typedef struct {
 /*
  * Run the ncurses TUI loop on the given board.
  * Saves the board to 'save_path' on normal exit.
+ * board_name is a short display name shown in the title bar (can be NULL).
  * Returns 0 on normal exit (user pressed q), non-zero on error.
  */
-int tui_run(Board *board, const char *save_path);
+int tui_run(Board *board, const char *save_path, const char *board_name);
 
 #endif

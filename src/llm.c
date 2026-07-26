@@ -319,7 +319,8 @@ static int poll_opencode_job(int slot)
             }
             finalise_result(slot);
             j->state = LLM_FAILED;
-            if (!j->result) j->result = xstrdup("timeout");
+            if (!j->result || !j->result[0])
+                j->result = xstrdup("timeout");
             return 1;
         }
     }
@@ -348,11 +349,23 @@ static int poll_opencode_job(int slot)
                 int status;
                 waitpid(j->child_pid, &status, 0);
                 j->child_pid = 0;
+                if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                    finalise_result(slot);
+                    if (!j->result || !j->result[0])
+                        j->result = xstrdup("non-zero exit");
+                    j->state = LLM_FAILED;
+                    return 1;
+                }
+                if (WIFSIGNALED(status)) {
+                    finalise_result(slot);
+                    if (!j->result || !j->result[0])
+                        j->result = xstrdup("killed by signal");
+                    j->state = LLM_FAILED;
+                    return 1;
+                }
             }
             finalise_result(slot);
-            /* Check exit status: non-zero exit is failure */
-            j->state = LLM_DONE;  /* we treat any completion as DONE for now;
-                                     the result may contain an error message */
+            j->state = LLM_DONE;
             return 1;
         }
         /* n == -1 with EAGAIN means no data available — that's fine */
@@ -510,7 +523,7 @@ int llm_submit(const char *prompt, int card_id, int timeout_secs)
     j->state        = LLM_QUEUED;
     j->prompt       = xstrdup(prompt);
     j->card_id      = card_id;
-    j->timeout_secs = timeout_secs;
+    j->timeout_secs = timeout_secs > 0 ? timeout_secs : llm_default_timeout();
     j->child_pid    = 0;
     j->pipe_fd      = -1;
     j->started_at   = 0;
@@ -610,6 +623,29 @@ const LlmJob *llm_job_at(int index)
         }
     }
     return NULL;
+}
+
+const LlmJob *llm_get_job_for_card(int card_id)
+{
+    if (!g_initialized || card_id < 0) return NULL;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (g_jobs[i].id != 0 && g_jobs[i].card_id == card_id) {
+            LlmJobState s = g_jobs[i].state;
+            if (s == LLM_RUNNING || s == LLM_QUEUED)
+                return &g_jobs[i];
+        }
+    }
+    return NULL;
+}
+
+int llm_default_timeout(void)
+{
+    const char *val = getenv("KANBAN_LLM_TIMEOUT");
+    if (val) {
+        int t = atoi(val);
+        if (t > 0) return t;
+    }
+    return 120;  /* default 120 seconds */
 }
 
 void llm_set_provider(llm_spawn_fn fn)

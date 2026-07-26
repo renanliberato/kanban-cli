@@ -31,7 +31,7 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] Iteration 3 M4: Card detail view, label picker, fuzzy filter
 
 - [x] Iteration 3 M5: Adaptive layout + undo + archive
-- [ ] Iteration 3 M6: Background jobs polish + multiple boards
+- [x] Iteration 3 M6: Background jobs polish + multiple boards
 - [ ] Iteration 3 M7: Comments + agent primitives; review flow removal (backlog)
 
 ## Git log so far
