@@ -15,27 +15,31 @@ TARGET     = $(BINDIR)/kanban
 TESTBIN    = $(BINDIR)/test_board
 TESTDBBIN  = $(BINDIR)/test_db
 TESTLLMBIN = $(BINDIR)/test_llm
+TESTENRICH  = $(BINDIR)/test_enrich
 
-SRCS       = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/tui.c $(SRCDIR)/llm.c \
+SRCS       = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/tui.c $(SRCDIR)/llm.c $(SRCDIR)/enrich.c \
              $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
-TESTSRCS   = $(TESTDIR)/test_board.c $(SRCDIR)/board.c $(SRCDIR)/db.c \
+TESTSRCS   = $(TESTDIR)/test_board.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/enrich.c \
              $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
 TESTDBSRCS = $(TESTDIR)/test_db.c $(SRCDIR)/db.c $(VENDOR)/sqlite3.c
 TESTLLMSRCS = $(TESTDIR)/test_llm.c $(SRCDIR)/llm.c
+TESTENRICHSRCS = $(TESTDIR)/test_enrich.c $(SRCDIR)/enrich.c $(VENDOR)/cJSON.c
 
 OBJS       = $(patsubst %.c,$(BUILDDIR)/%.o,$(SRCS))
 TESTOBJS   = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTSRCS))
 TESTDBOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTDBSRCS))
 TESTLLMOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTLLMSRCS))
+TESTENRICHOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTENRICHSRCS))
 
 .PHONY: all test clean
 
 all: $(TARGET)
 
-test: $(TESTBIN) $(TESTDBBIN) $(TESTLLMBIN)
+test: $(TESTBIN) $(TESTDBBIN) $(TESTLLMBIN) $(TESTENRICH)
 	./$(TESTBIN)
 	./$(TESTDBBIN)
 	./$(TESTLLMBIN)
+	./$(TESTENRICH)
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lncurses
@@ -47,6 +51,9 @@ $(TESTDBBIN): $(TESTDBOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(TESTLLMBIN): $(TESTLLMOBJS) | $(BINDIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(TESTENRICH): $(TESTENRICHOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BINDIR):

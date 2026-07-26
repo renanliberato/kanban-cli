@@ -1,18 +1,23 @@
 #include "tui.h"
 #include "llm.h"
+#include "enrich.h"
 #include <ncurses.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 /* ------------------------------------------------------------------ */
-/* internal constants                                                 */
+/* autosave helper (forward declaration)                              */
 /* ------------------------------------------------------------------ */
 
-#define MIN_ROWS        20
-#define MIN_COLS        60
-#define INPUT_MAX       128
-#define FLASH_DURATION   2    /* seconds flash message stays visible */
+static void autosave(const Board *board);
+/* ------------------------------------------------------------------ */
+
+#define MIN_ROWS            20
+#define MIN_COLS            60
+#define INPUT_MAX           128
+#define FLASH_DURATION       2    /* seconds flash message stays visible */
+#define REVIEW_FIELD_MAX    32   /* max fields in review screen */
 
 enum { COL_TUI_TODO = 0, COL_TUI_DOING = 1, COL_TUI_DONE = 2 };
 
@@ -23,6 +28,7 @@ enum { COL_TUI_TODO = 0, COL_TUI_DOING = 1, COL_TUI_DONE = 2 };
 static TuiState    state;
 static int         has_color = 0;
 static const char *g_save_path = NULL;
+static Board      *g_board = NULL;  /* kept for review-mode access */
 
 /* flash message: shown briefly in the status bar after an event */
 static char   g_flash_buf[128];
@@ -32,13 +38,30 @@ static time_t g_flash_until = 0;
 static int    g_spinner_idx = 0;
 static const char g_spinner_chars[] = "|/-\\";
 
+/* enrich review mode state */
+static int  g_review_mode  = 0;
+static int  g_review_card_id = -1;
+static int  g_review_fields = 0;
+static int  g_review_sel    = 0;          /* selected field index (0 = Confirm button) */
+static int  g_review_accepted[REVIEW_FIELD_MAX];  /* 0=rejected, 1=accepted */
+struct review_field {
+    int  type;     /* 0=description, 1=label, 2=question */
+    char text[256];
+    char extra[256]; /* answer text for questions */
+};
+static struct review_field g_review_items[REVIEW_FIELD_MAX];
+
+static int  g_enrich_job_id = -1;  /* job we're waiting for in review */
+
 /* color-pair ids */
 enum {
     PAIR_HEADER_TODO = 1,
     PAIR_HEADER_DOING,
     PAIR_HEADER_DONE,
     PAIR_SELECTED,
-    PAIR_STATUSBAR
+    PAIR_STATUSBAR,
+    PAIR_REVIEW_ACCEPTED,
+    PAIR_REVIEW_REJECTED
 };
 
 static const char *column_names[] = { "To Do", "Doing", "Done" };
@@ -50,14 +73,10 @@ static const short header_bg[]    = { COLOR_BLUE, COLOR_YELLOW, COLOR_GREEN };
 
 static int col_width(int total_w)
 {
-    /* 3 columns + 4 vertical-bar positions: (total_w - 4) / 3 */
     int w = (total_w - 4) / 3;
-    return w < 6 ? 6 : w;   /* minimum usable column width */
+    return w < 6 ? 6 : w;
 }
 
-/* centre a string in a field of `width` characters, padding
-   with spaces on either side.  Returns the number of chars written,
-   which is always `width`. */
 static int draw_centered(int y, int x, const char *str, int width)
 {
     if (!str) str = "";
@@ -73,7 +92,6 @@ static int draw_centered(int y, int x, const char *str, int width)
     return width;
 }
 
-/* Build a header string like "To Do (3)". Returns a static buffer. */
 static const char *make_header(const char *name, int count)
 {
     static char buf[64];
@@ -82,14 +100,11 @@ static const char *make_header(const char *name, int count)
     return buf;
 }
 
-/* draw a card title truncated to fit `width` characters.
-   If the title is too long, show an ellipsis (…) at the end.
-   If `selected` is non-zero the text is rendered in reverse video. */
 static void draw_card(int y, int x, const char *title, int width, int selected)
 {
     if (!title) title = "";
     int len = (int)strlen(title);
-    int usable = width - 1;   /* first char is a leading space */
+    int usable = width - 1;
 
     move(y, x);
     if (selected && has_color)
@@ -100,23 +115,15 @@ static void draw_card(int y, int x, const char *title, int width, int selected)
     addch(' ');
 
     if (len <= usable) {
-        /* full title fits */
         for (int i = 0; i < len; i++)
             addch((unsigned char)title[i]);
-        /* fill rest with spaces */
         for (int i = len + 1; i < width; i++)
             addch(' ');
     } else {
-        /* truncate with ellipsis: "…" is 3 bytes in UTF-8, but
-           we display it as '…' (single wide char in ncurses with
-           UTF-8 locales, or as '.' fallback). */
-        int show = usable - 1;   /* reserve last column for ellipsis */
+        int show = usable - 1;
         if (show < 0) show = 0;
         for (int i = 0; i < show; i++)
             addch((unsigned char)title[i]);
-        /* Add ellipsis character. In a UTF-8 locale ncurses handles
-           the multi-byte char; in a C locale it shows as replacement.
-           We use '~' as a portable fallback that renders everywhere. */
         addch('~');
     }
 
@@ -138,20 +145,18 @@ static void tui_init(void)
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
-    curs_set(0);          /* hide hardware cursor */
-    /* ESCDELAY is set via setenv() in main.c before initscr */
+    curs_set(0);
 
     if (has_colors()) {
         start_color();
         has_color = 1;
-        /* column headers: white text on coloured background */
         init_pair(PAIR_HEADER_TODO,  COLOR_WHITE, header_bg[COL_TUI_TODO]);
         init_pair(PAIR_HEADER_DOING, COLOR_BLACK, header_bg[COL_TUI_DOING]);
         init_pair(PAIR_HEADER_DONE,  COLOR_WHITE, header_bg[COL_TUI_DONE]);
-        /* selected card: reversed video */
         init_pair(PAIR_SELECTED, COLOR_BLACK, COLOR_WHITE);
-        /* status bar */
         init_pair(PAIR_STATUSBAR, COLOR_BLACK, COLOR_WHITE);
+        init_pair(PAIR_REVIEW_ACCEPTED, COLOR_GREEN, COLOR_BLACK);
+        init_pair(PAIR_REVIEW_REJECTED, COLOR_RED, COLOR_BLACK);
     }
 }
 
@@ -164,8 +169,6 @@ static void tui_shutdown(void)
 /* drawing                                                            */
 /* ------------------------------------------------------------------ */
 
-/* draw a horizontal border line at row y:
-     +--------+--------+--------+      (or the ACS equivalent) */
 static void draw_border_line(int y, int cw)
 {
     move(y, 0);
@@ -174,7 +177,7 @@ static void draw_border_line(int y, int cw)
         for (int j = 0; j < cw; j++)
             addch(ACS_HLINE);
         if (ci < 2)
-            addch(ACS_TTEE);   /* top tee */
+            addch(ACS_TTEE);
     }
     addch(ACS_URCORNER);
 }
@@ -182,14 +185,14 @@ static void draw_border_line(int y, int cw)
 static void draw_separator(int y, int cw)
 {
     move(y, 0);
-    addch(ACS_LTEE);    /* |- */
+    addch(ACS_LTEE);
     for (int ci = 0; ci < 3; ci++) {
         for (int j = 0; j < cw; j++)
             addch(ACS_HLINE);
         if (ci < 2)
-            addch(ACS_PLUS);   /* -|- */
+            addch(ACS_PLUS);
     }
-    addch(ACS_RTEE);    /* -| */
+    addch(ACS_RTEE);
 }
 
 static void draw_bottom(int y, int cw)
@@ -200,12 +203,11 @@ static void draw_bottom(int y, int cw)
         for (int j = 0; j < cw; j++)
             addch(ACS_HLINE);
         if (ci < 2)
-            addch(ACS_BTEE);   /* -|- (bottom) */
+            addch(ACS_BTEE);
     }
     addch(ACS_LRCORNER);
 }
 
-/* draw the three column headers (row y, just after top border) */
 static void draw_headers(int y, int cw, const Board *board)
 {
     int x = 0;
@@ -230,7 +232,6 @@ static void draw_headers(int y, int cw, const Board *board)
     }
 }
 
-/* draw one card row across all three columns */
 static void draw_card_row(int y, int cw, const Board *board, int row_idx)
 {
     int x = 0;
@@ -252,7 +253,6 @@ static void draw_card_row(int y, int cw, const Board *board, int row_idx)
     }
 }
 
-/* draw the status bar on the bottom row */
 static void draw_status_bar(int rows)
 {
     move(rows - 1, 0);
@@ -262,17 +262,14 @@ static void draw_status_bar(int rows)
     int x = 0;
     int cols = COLS;
 
-    /* Flash message takes priority */
     if (g_flash_until && time(NULL) < g_flash_until) {
         int flen = (int)strlen(g_flash_buf);
-        /* Left-align the flash message with a leading space */
         addch(' '); x++;
         for (int i = 0; i < flen && x < cols; i++, x++)
             addch((unsigned char)g_flash_buf[i]);
         for (; x < cols; x++)
             addch(' ');
     } else {
-        /* Build the status line: job indicator + hint */
         int job_count = llm_job_count();
         int running_count = 0;
         for (int i = 0; i < job_count; i++) {
@@ -284,7 +281,6 @@ static void draw_status_bar(int rows)
         char left[64] = "";
         int left_len = 0;
         if (running_count > 0) {
-            /* Show spinner + count, e.g. "| 1 job " */
             char sp = g_spinner_chars[g_spinner_idx % 4];
             left_len = snprintf(left, sizeof(left),
                                 " %c %d job%s running  ",
@@ -293,24 +289,19 @@ static void draw_status_bar(int rows)
         }
 
         const char *hint =
-            "q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move  T test";
+            "q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move  C-E enrich";
         int hint_len = (int)strlen(hint);
 
-        /* Layout: left part (job status) + centred hint.
-           If left part is too wide, truncate the hint. */
         int available = cols - left_len;
         if (available < 10) {
-            /* Not enough room — just fill with spaces */
             for (int i = 0; i < left_len && x < cols; i++, x++)
                 addch((unsigned char)left[i]);
             for (; x < cols; x++)
                 addch(' ');
         } else {
-            /* Print left part */
             for (int i = 0; i < left_len && x < cols; i++, x++)
                 addch((unsigned char)left[i]);
 
-            /* Centre the hint in remaining space */
             int hint_pad = available > hint_len
                            ? (available - hint_len) / 2 : 0;
             for (int i = 0; i < hint_pad && x < cols; i++, x++)
@@ -328,15 +319,274 @@ static void draw_status_bar(int rows)
     else           attroff(A_REVERSE);
 }
 
-/* main draw routine */
-static void tui_draw(const Board *board)
+/* ---- review screen draw ---- */
+
+static void draw_review_screen(void)
 {
     erase();
 
     int rows = LINES;
     int cols = COLS;
 
-    /* terminal too small */
+    if (rows < 10 || cols < 40) {
+        mvaddstr(rows / 2, (cols - 40) / 2 > 0 ? (cols - 40) / 2 : 0,
+                 "Terminal too small for review.");
+        return;
+    }
+
+    /* Title bar */
+    if (has_color) attron(A_REVERSE);
+    move(0, 0);
+    char title[64];
+    snprintf(title, sizeof(title), " AI Enrich - Card #%d  ", g_review_card_id);
+    for (int i = 0; i < cols; i++) addch(' ');
+    mvaddstr(0, (cols - (int)strlen(title)) / 2, title);
+    if (has_color) attroff(A_REVERSE);
+
+    /* Field list */
+    int y = 2;
+    for (int i = 0; i < g_review_fields; i++) {
+        if (y >= rows - 2) break;
+        int is_sel = (i == g_review_sel);
+        int accepted = g_review_accepted[i];
+
+        if (is_sel) {
+            if (has_color) attron(A_REVERSE);
+            else attron(A_BOLD);
+        }
+
+        /* Checkmark */
+        move(y, 2);
+        if (accepted)
+            addstr("[x] ");
+        else
+            addstr("[ ] ");
+
+        /* Field content */
+        struct review_field *f = &g_review_items[i];
+        switch (f->type) {
+        case 0: /* description */
+            addstr("Description: ");
+            {
+                int remaining = cols - 20;
+                int slen = (int)strlen(f->text);
+                if (slen > remaining)
+                    slen = remaining - 3;
+                for (int j = 0; j < slen; j++)
+                    addch((unsigned char)f->text[j]);
+                if ((int)strlen(f->text) > remaining)
+                    addstr("...");
+            }
+            break;
+        case 1: /* label */
+            addstr("Label: ");
+            addstr(f->text);
+            break;
+        case 2: /* question */
+            addstr("Q: ");
+            {
+                int remaining = (cols - 10) / 2;
+                int slen = (int)strlen(f->text);
+                if (slen > remaining) slen = remaining - 2;
+                for (int j = 0; j < slen; j++)
+                    addch((unsigned char)f->text[j]);
+                if ((int)strlen(f->text) > remaining)
+                    addstr("..");
+            }
+            addstr("  A: ");
+            {
+                int remaining = (cols - 16) / 2;
+                int slen = (int)strlen(f->extra);
+                if (slen > remaining) slen = remaining - 2;
+                for (int j = 0; j < slen; j++)
+                    addch((unsigned char)f->extra[j]);
+                if ((int)strlen(f->extra) > remaining)
+                    addstr("..");
+            }
+            break;
+        }
+
+        if (is_sel) {
+            if (has_color) attroff(A_REVERSE);
+            else attroff(A_BOLD);
+        }
+        y++;
+    }
+
+    /* Confirm button */
+    y++;
+    if (y < rows - 2) {
+        int is_sel = (g_review_sel == g_review_fields);
+        if (is_sel) {
+            if (has_color) attron(A_REVERSE);
+            else attron(A_BOLD);
+        }
+        mvaddstr(y, (cols - 20) / 2, "  [ Confirm & Apply ]  ");
+        if (is_sel) {
+            if (has_color) attroff(A_REVERSE);
+            else attroff(A_BOLD);
+        }
+    }
+
+    /* Bottom hint */
+    move(rows - 1, 0);
+    if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
+    else attron(A_REVERSE);
+    const char *hint = " Enter/Space=toggle  j/k=navigate  c=confirm  ESC=discard ";
+    for (int i = 0; i < cols; i++) {
+        if (i < (int)strlen(hint))
+            addch((unsigned char)hint[i]);
+        else
+            addch(' ');
+    }
+    if (has_color) attroff(COLOR_PAIR(PAIR_STATUSBAR));
+    else attroff(A_REVERSE);
+
+    refresh();
+}
+
+/* ---- review helpers ---- */
+
+/* Build review fields from an EnrichResult */
+static void review_build_fields(const EnrichResult *er)
+{
+    g_review_fields = 0;
+
+    /* Description (always present, may be NULL) */
+    if (er->description) {
+        struct review_field *f = &g_review_items[g_review_fields];
+        f->type = 0;
+        snprintf(f->text, sizeof(f->text), "%s", er->description);
+        f->extra[0] = '\0';
+        g_review_accepted[g_review_fields] = 1; /* default: accepted */
+        g_review_fields++;
+    }
+
+    /* Labels */
+    for (int i = 0; er->labels && er->labels[i]; i++) {
+        if (g_review_fields >= REVIEW_FIELD_MAX) break;
+        struct review_field *f = &g_review_items[g_review_fields];
+        f->type = 1;
+        snprintf(f->text, sizeof(f->text), "%s", er->labels[i]);
+        f->extra[0] = '\0';
+        g_review_accepted[g_review_fields] = 1;
+        g_review_fields++;
+    }
+
+    /* Questions */
+    for (int i = 0; er->questions && er->questions[i]; i++) {
+        if (g_review_fields >= REVIEW_FIELD_MAX) break;
+        struct review_field *f = &g_review_items[g_review_fields];
+        f->type = 2;
+        snprintf(f->text, sizeof(f->text), "%s", er->questions[i]);
+        snprintf(f->extra, sizeof(f->extra), "%s",
+                 er->answers && er->answers[i] ? er->answers[i] : "");
+        g_review_accepted[g_review_fields] = 1;
+        g_review_fields++;
+    }
+
+    g_review_sel = 0;
+}
+
+/* Apply accepted fields to the card */
+static void review_apply(Board *board)
+{
+    EnrichResult er;
+    memset(&er, 0, sizeof(er));
+
+    /* Collect accepted fields back into an EnrichResult for application */
+    for (int i = 0; i < g_review_fields; i++) {
+        if (!g_review_accepted[i]) continue;
+        struct review_field *f = &g_review_items[i];
+        switch (f->type) {
+        case 0: /* description */
+            board_set_card_description(board, g_review_card_id, f->text);
+            break;
+        case 1: /* label */
+            board_add_label(board, g_review_card_id, f->text);
+            break;
+        case 2: /* question — store as Q&A? Not implemented in card model yet.
+                   For now, skip. */
+            break;
+        }
+    }
+
+    autosave(board);
+}
+
+static void review_cleanup(void)
+{
+    g_review_mode = 0;
+    g_review_card_id = -1;
+    g_review_fields = 0;
+}
+
+/* ---- review input handler ---- */
+
+static int handle_review_input(Board *board, int ch)
+{
+    switch (ch) {
+    case 'q':  /* fall through: q in review cancels (some users expect this) */
+    case 27:   /* ESC — discard all */
+        review_cleanup();
+        return 1;
+
+    case 'j':
+    case KEY_DOWN:
+        g_review_sel++;
+        if (g_review_sel > g_review_fields)
+            g_review_sel = g_review_fields; /* clamp to Confirm button */
+        return 1;
+
+    case 'k':
+    case KEY_UP:
+        if (g_review_sel > 0)
+            g_review_sel--;
+        return 1;
+
+    case '\n':
+    case '\r':
+    case KEY_ENTER:
+    case ' ':
+        if (g_review_sel == g_review_fields) {
+            /* Confirm button — apply and exit */
+            review_apply(board);
+            review_cleanup();
+        } else {
+            /* Toggle acceptance */
+            g_review_accepted[g_review_sel] = !g_review_accepted[g_review_sel];
+        }
+        return 1;
+
+    case 'c':
+    case 'C':
+        /* Confirm directly */
+        review_apply(board);
+        review_cleanup();
+        return 1;
+
+    case KEY_RESIZE:
+        return 1;
+
+    default:
+        return 1;
+    }
+}
+
+/* ---- main draw (board + status bar) ---- */
+
+static void tui_draw(const Board *board)
+{
+    if (g_review_mode) {
+        draw_review_screen();
+        return;
+    }
+
+    erase();
+
+    int rows = LINES;
+    int cols = COLS;
+
     if (rows < MIN_ROWS || cols < MIN_COLS) {
         const char *msg = "Terminal too small. Resize to at least "
                           "60 columns x 20 rows.";
@@ -349,17 +599,15 @@ static void tui_draw(const Board *board)
 
     int cw = col_width(cols);
 
-    draw_border_line(0, cw);                    /* row 0: top border    */
-    draw_headers(1, cw, board);                 /* row 1: headers       */
-    draw_separator(2, cw);                      /* row 2: separator     */
+    draw_border_line(0, cw);
+    draw_headers(1, cw, board);
+    draw_separator(2, cw);
 
-    /* card area: rows 3 .. rows-3 (leaving bottom border + status bar) */
     int card_area_start = 3;
-    int card_area_end   = rows - 2;  /* exclusive */
+    int card_area_end   = rows - 2;
     int max_rows        = card_area_end - card_area_start;
     if (max_rows < 0) max_rows = 0;
 
-    /* figure out how many card rows we need per column */
     int max_cards = 0;
     for (int ci = 0; ci < 3; ci++) {
         if (board->columns[ci].count > max_cards)
@@ -372,13 +620,12 @@ static void tui_draw(const Board *board)
         draw_card_row(card_area_start + r, cw, board, r);
     }
 
-    draw_bottom(card_area_start + draw_rows, cw);   /* bottom border */
-    draw_status_bar(rows);                           /* status bar    */
+    draw_bottom(card_area_start + draw_rows, cw);
+    draw_status_bar(rows);
 
     refresh();
 }
 
-/* clamp selection to valid range after column change */
 static void clamp_selection(const Board *board)
 {
     if (state.sel_col < 0) state.sel_col = 0;
@@ -407,8 +654,6 @@ static void autosave(const Board *board)
 /* input mode: inline text editor on the status bar                   */
 /* ------------------------------------------------------------------ */
 
-/* Draw the status bar with a prompt + input buffer.
-   Returns the column where the cursor should be placed. */
 static void draw_input_bar(const char *prompt, const char *buf, int buf_len)
 {
     int rows = LINES;
@@ -420,13 +665,10 @@ static void draw_input_bar(const char *prompt, const char *buf, int buf_len)
     else           attron(A_REVERSE);
 
     int x = 0;
-    /* print prompt */
     for (int i = 0; i < plen && x < cols; i++, x++)
         addch((unsigned char)prompt[i]);
-    /* print buffer */
     for (int i = 0; i < buf_len && x < cols; i++, x++)
         addch((unsigned char)buf[i]);
-    /* fill rest of line */
     for (; x < cols; x++)
         addch(' ');
 
@@ -434,13 +676,6 @@ static void draw_input_bar(const char *prompt, const char *buf, int buf_len)
     else           attroff(A_REVERSE);
 }
 
-/*
- * Run an inline text-editing loop on the status bar.
- * Prompt is shown left-justified.
- * The buffer is pre-filled with `initial`.
- * Returns 0 if confirmed (Enter), -1 if cancelled (ESC).
- * On confirm, `buf` contains the entered text (may be empty).
- */
 static int input_line(const char *prompt, char *buf, size_t bufsz,
                       const char *initial)
 {
@@ -452,44 +687,37 @@ static int input_line(const char *prompt, char *buf, size_t bufsz,
 
     int prompt_len = (int)strlen(prompt);
 
-    curs_set(1);  /* show cursor */
+    curs_set(1);
 
     int rows = LINES;
 
     while (1) {
         draw_input_bar(prompt, buf, len);
-        /* place cursor after the typed text */
         move(rows - 1, prompt_len + len);
         refresh();
 
         int ch = getch();
 
-        /* timeout / no input — just redraw */
         if (ch == ERR)
             continue;
 
-        /* esc cancels */
         if (ch == 27) {
             curs_set(0);
             return -1;
         }
-        /* enter confirms (including empty => cancel semantics handled by caller) */
         if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
             curs_set(0);
             return 0;
         }
-        /* backspace */
         if (ch == KEY_BACKSPACE || ch == 127 || ch == '\b') {
             if (len > 0)
                 buf[--len] = '\0';
             continue;
         }
-        /* terminal resize */
         if (ch == KEY_RESIZE) {
             rows = LINES;
             continue;
         }
-        /* printable ASCII */
         if (ch >= 32 && ch <= 126 && len < (int)bufsz - 1) {
             buf[len++] = (char)ch;
             buf[len]   = '\0';
@@ -501,17 +729,12 @@ static int input_line(const char *prompt, char *buf, size_t bufsz,
 /* confirm mode: y/n prompt on the status bar                         */
 /* ------------------------------------------------------------------ */
 
-/*
- * Show a prompt on the status bar and wait for y/n/ESC.
- * Returns 1 if confirmed (y), 0 otherwise (n or ESC).
- */
 static int confirm(const char *prompt)
 {
     int rows = LINES;
     int cols = COLS;
     int plen = (int)strlen(prompt);
 
-    /* draw prompt */
     move(rows - 1, 0);
     if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
     else           attron(A_REVERSE);
@@ -535,7 +758,6 @@ static int confirm(const char *prompt)
         if (ch == KEY_RESIZE) {
             rows = LINES;
             cols = COLS;
-            /* redraw prompt */
             plen = (int)strlen(prompt);
             move(rows - 1, 0);
             if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
@@ -552,16 +774,44 @@ static int confirm(const char *prompt)
 }
 
 /* ------------------------------------------------------------------ */
+/* enrich: submit an enrichment job for a card                        */
+/* ------------------------------------------------------------------ */
+
+static void submit_enrich_job(Board *board, int card_id)
+{
+    Card *card = board_get_card(board, card_id);
+    if (!card) return;
+
+    char *prompt = enrich_build_prompt(card->title, card->description);
+    if (!prompt) return;
+
+    int job_id = llm_submit(prompt, card_id, 60);
+    free(prompt);
+
+    if (job_id >= 0) {
+        g_enrich_job_id = job_id;
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Enriching card #%d...", card_id);
+        g_flash_until = time(NULL) + FLASH_DURATION;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* event handling                                                     */
 /* ------------------------------------------------------------------ */
 
-/*
- * Handle a single keypress.
- * Returns 0 to signal the main loop to exit, 1 to continue.
- * Mutations are saved immediately via autosave().
- */
 static int handle_input(Board *board, int ch)
 {
+    /* Ctrl+E: submit enrich for selected card */
+    if (ch == 5) { /* Ctrl+E */
+        if (state.sel_card >= 0) {
+            const Column *col = &board->columns[state.sel_col];
+            int card_id = col->cards[state.sel_card].id;
+            submit_enrich_job(board, card_id);
+        }
+        return 1;
+    }
+
     switch (ch) {
 
     /* ---- quit ---- */
@@ -599,7 +849,7 @@ static int handle_input(Board *board, int ch)
         return 1;
 
     case KEY_RESIZE:
-        return 1;   /* handled by redrawing */
+        return 1;
 
     /* ---- add card ---- */
     case 'a': {
@@ -611,6 +861,10 @@ static int handle_input(Board *board, int ch)
                 state.sel_card =
                     board->columns[state.sel_col].count - 1;
                 autosave(board);
+                /* Flash hint for Ctrl+E */
+                snprintf(g_flash_buf, sizeof(g_flash_buf),
+                         "Card #%d added - C-E to enrich with AI", new_id);
+                g_flash_until = time(NULL) + FLASH_DURATION;
             }
         }
         return 1;
@@ -678,24 +932,70 @@ static int handle_input(Board *board, int ch)
         }
         return 1;
 
-    /* ---- dev-only test key: submit a fake LLM job (M6 removal) ---- */
-    /* Press 'T' to submit a fake LLM job for the currently selected
-       card.  This exercises the full job lifecycle end to end and is
-       wired to the fake provider so it works on the CI box without
-       opencode installed.  The card's title is sent as the prompt. */
-    case 'T':
-        if (state.sel_card >= 0) {
-            const Column *col = &board->columns[state.sel_col];
-            int card_id = col->cards[state.sel_card].id;
-            const char *title = col->cards[state.sel_card].title;
-            (void)llm_submit(title, card_id, 30);
-            /* No flash on submit — the status-bar spinner shows activity. */
-        }
-        return 1;
-
     default:
-        return 1;   /* ignore unknown keys */
+        return 1;
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* check enrich job completion and transition to review               */
+/* ------------------------------------------------------------------ */
+
+static void check_enrich_completion(void)
+{
+    (void)g_board;  /* may be used in future */
+
+    if (g_enrich_job_id < 0) return;
+
+    const LlmJob *job = llm_get_job(g_enrich_job_id);
+    if (!job) {
+        g_enrich_job_id = -1;
+        return;
+    }
+
+    if (job->state == LLM_FAILED || job->state == LLM_CANCELLED) {
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Enrich job failed");
+        g_flash_until = time(NULL) + FLASH_DURATION;
+        g_enrich_job_id = -1;
+        return;
+    }
+
+    if (job->state != LLM_DONE) return;
+
+    /* Job completed — parse result and enter review mode */
+    g_enrich_job_id = -1;
+
+    if (!job->result) {
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Enrich job returned empty result");
+        g_flash_until = time(NULL) + FLASH_DURATION;
+        return;
+    }
+
+    char *inner = enrich_unwrap_envelope(job->result);
+    if (!inner) {
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Failed to unwrap enrich result");
+        g_flash_until = time(NULL) + FLASH_DURATION;
+        return;
+    }
+
+    EnrichResult er;
+    if (enrich_parse_result(inner, &er) != 0) {
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Failed to parse enrich result");
+        g_flash_until = time(NULL) + FLASH_DURATION;
+        free(inner);
+        return;
+    }
+    free(inner);
+
+    /* Enter review mode */
+    g_review_mode = 1;
+    g_review_card_id = job->card_id;
+    review_build_fields(&er);
+    enrich_free_result(&er);
 }
 
 /* ------------------------------------------------------------------ */
@@ -707,11 +1007,12 @@ int tui_run(Board *board, const char *save_path)
     if (!board) return -1;
 
     g_save_path = save_path;
+    g_board = board;
 
     state.sel_col  = 0;
     state.sel_card = board->columns[0].count > 0 ? 0 : -1;
 
-    /* flash message helper – sets the flash bar for `duration` seconds */
+    /* flash message helper */
     #define SET_FLASH(fmt, ...) do { \
         snprintf(g_flash_buf, sizeof(g_flash_buf), fmt, ##__VA_ARGS__); \
         g_flash_until = time(NULL) + FLASH_DURATION; \
@@ -719,12 +1020,9 @@ int tui_run(Board *board, const char *save_path)
 
     tui_init();
 
-    /* Non-blocking poll loop: timeout(100) means getch() returns ERR
-       after 100ms of no input.  This lets us poll LLM jobs and spin
-       the activity spinner without freezing the TUI. */
-    timeout(100);           /* getch() returns ERR after 100ms */
+    timeout(100);
 
-    tui_draw(board);        /* initial draw */
+    tui_draw(board);
 
     int running  = 1;
     int dirty    = 0;
@@ -734,14 +1032,17 @@ int tui_run(Board *board, const char *save_path)
         int ch = getch();
 
         if (ch != ERR) {
-            running = handle_input(board, ch);
-            dirty   = 1;
+            if (g_review_mode) {
+                running = handle_review_input(board, ch);
+            } else {
+                running = handle_input(board, ch);
+            }
+            dirty = 1;
         }
 
         /* Poll LLM jobs — non-blocking */
         int transitions = llm_poll();
         if (transitions > 0) {
-            /* Check what transitioned and flash a brief note */
             int job_count = llm_job_count();
             for (int i = 0; i < job_count; i++) {
                 const LlmJob *j = llm_job_at(i);
@@ -755,6 +1056,10 @@ int tui_run(Board *board, const char *save_path)
                     SET_FLASH("Job #%d cancelled", j->id);
                 }
             }
+
+            /* Check for enrich job completion */
+            check_enrich_completion();
+
             dirty = 1;
         }
 
@@ -773,7 +1078,7 @@ int tui_run(Board *board, const char *save_path)
             }
         }
 
-        /* Detect job count change for dirty flag */
+        /* Detect job count change */
         {
             int cur = llm_job_count();
             if (cur != prev_job_count) {
@@ -798,7 +1103,6 @@ int tui_run(Board *board, const char *save_path)
 
     tui_shutdown();
 
-    /* final save on exit */
     if (save_path)
         board_save(board, save_path);
 

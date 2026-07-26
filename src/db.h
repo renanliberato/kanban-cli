@@ -16,15 +16,30 @@ void  db_close(db_t *db);
 
 /* full board load / save */
 int   db_load_board(db_t *db, int *next_id_out, int col_counts[3],
-                    int *ids[3], char **titles[3]);
+                    int *ids[3], char **titles[3],
+                    char **descriptions[3],
+                    char **created_ats[3],
+                    char **updated_ats[3],
+                    int *archived_flags[3],
+                    char ***labels[3],
+                    int label_counts[3]);
 int   db_save_board(db_t *db, int next_id, const int col_counts[3],
-                    int *ids[3], char **titles[3]);
+                    int *ids[3], char **titles[3],
+                    char **descriptions[3],
+                    char **created_ats[3],
+                    char **updated_ats[3],
+                    int *archived_flags[3],
+                    char ***labels[3],
+                    int label_counts[3]);
 
 /* incremental mutations */
 int   db_add_card(db_t *db, int col, int id, const char *title);
 int   db_delete_card(db_t *db, int id);
 int   db_move_card(db_t *db, int id, int dest_col);
 int   db_edit_card_title(db_t *db, int id, const char *new_title);
+int   db_set_card_description(db_t *db, int id, const char *desc);
+int   db_add_label(db_t *db, int card_id, const char *label);
+int   db_remove_label(db_t *db, int card_id, const char *label);
 
 /* JSON migration — create tables + import from a cJSON-loaded board */
 int   db_migrate_from_board(db_t *db, int next_id,

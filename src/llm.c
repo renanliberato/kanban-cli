@@ -385,11 +385,20 @@ static int submit_fake(int slot)
     }
     p->output_buf[0] = '\0';
 
-    /* Pre-build the result: deterministic echo */
-    char echo[512];
+    /* Pre-build the result: deterministic enrichment JSON.
+       The envelope has a "result" key whose value is the inner JSON
+       that enrich_unwrap_envelope + enrich_parse_result will parse.
+       Keep the fake output short enough to fit in the buffer. */
+    char echo[1024];
     int written = snprintf(echo, sizeof(echo),
-                           "{\"result\": \"Fake response to: %s\"}",
-                           j->prompt ? j->prompt : "(null)");
+        "{"
+        "\"result\":"
+        "\"{\\\"description\\\":\\\"Fake enrichment result\\\","
+        "\\\"labels\\\":[\\\"fake\\\"],"
+        "\\\"questions\\\":["
+        "{\\\"q\\\":\\\"What is the scope?\\\",\\\"a\\\":\\\"Full implementation\\\"}"
+        "]}\""
+        "}");
     if (written > 0 && (size_t)written < sizeof(echo)) {
         append_output(slot, echo, (size_t)written);
     }

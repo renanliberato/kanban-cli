@@ -92,7 +92,8 @@ static void test_fresh_db_creation(void)
     int *ids[3] = {NULL, NULL, NULL};
     char **titles[3] = {NULL, NULL, NULL};
 
-    int rc = db_load_board(db, &next_id, col_counts, ids, titles);
+    int rc = db_load_board(db, &next_id, col_counts, ids, titles,
+                           NULL, NULL, NULL, NULL, NULL, NULL);
     ASSERT_EQ(rc, 0, "db_load_board succeeds on fresh db");
     ASSERT_EQ(next_id, 1, "fresh db has next_id=1");
     ASSERT_EQ(col_counts[0], 0, "fresh db: To Do empty");
@@ -152,7 +153,8 @@ static void test_crud_roundtrip(void)
     int *ids[3] = {NULL, NULL, NULL};
     char **titles[3] = {NULL, NULL, NULL};
 
-    int rc = db_load_board(db, &next_id, col_counts, ids, titles);
+    int rc = db_load_board(db, &next_id, col_counts, ids, titles,
+                           NULL, NULL, NULL, NULL, NULL, NULL);
     ASSERT_EQ(rc, 0, "db_load_board succeeds after mutations");
 
     /* next_id should be max(id)+1 = 4+1 = 5 */
@@ -201,7 +203,8 @@ static void test_reopen_persistence(void)
     int col_counts[3] = {0, 0, 0};
     int *ids[3] = {NULL, NULL, NULL};
     char **titles[3] = {NULL, NULL, NULL};
-    db_load_board(db, &next_id, col_counts, ids, titles);
+    db_load_board(db, &next_id, col_counts, ids, titles,
+                  NULL, NULL, NULL, NULL, NULL, NULL);
     ASSERT_EQ(col_counts[0], 1, "first open: To Do has 1 card");
     ASSERT_STREQ(titles[0][0], "hello", "first open: card is 'hello'");
     for (int ci = 0; ci < 3; ci++) {
@@ -218,7 +221,8 @@ static void test_reopen_persistence(void)
     memset(col_counts, 0, sizeof(col_counts));
     memset(ids, 0, sizeof(ids));
     memset(titles, 0, sizeof(titles));
-    db_load_board(db, &next_id, col_counts, ids, titles);
+    db_load_board(db, &next_id, col_counts, ids, titles,
+                  NULL, NULL, NULL, NULL, NULL, NULL);
 
     ASSERT_EQ(next_id, 3, "reopen: next_id=3");
     ASSERT_EQ(col_counts[0], 1, "reopen: To Do has 1 card");

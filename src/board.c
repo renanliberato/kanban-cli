@@ -162,8 +162,16 @@ void board_free(Board *b)
         b->db_handle = NULL;
     }
     for (int ci = 0; ci < MAX_COLUMNS; ci++) {
-        for (int i = 0; i < b->columns[ci].count; i++)
-            free(b->columns[ci].cards[i].title);
+        for (int i = 0; i < b->columns[ci].count; i++) {
+            Card *card = &b->columns[ci].cards[i];
+            free(card->title);
+            free(card->description);
+            free(card->created_at);
+            free(card->updated_at);
+            for (int li = 0; li < card->label_count; li++)
+                free(card->labels[li]);
+            free(card->labels);
+        }
         free(b->columns[ci].cards);
         b->columns[ci].cards    = NULL;
         b->columns[ci].count    = 0;
@@ -189,8 +197,14 @@ int board_add_card(Board *b, int col, const char *title)
     if (!title_copy) return -1;
 
     int idx = c->count++;
-    c->cards[idx].id    = b->next_id++;
-    c->cards[idx].title = title_copy;
+    c->cards[idx].id          = b->next_id++;
+    c->cards[idx].title       = title_copy;
+    c->cards[idx].description = NULL;
+    c->cards[idx].created_at  = NULL;
+    c->cards[idx].updated_at  = NULL;
+    c->cards[idx].archived    = 0;
+    c->cards[idx].labels      = NULL;
+    c->cards[idx].label_count = 0;
 
     /* incremental db write */
     if (b->db_handle)
@@ -261,6 +275,69 @@ int board_move_card(Board *b, int id, int dest_col)
     return 0;
 }
 
+int board_set_card_description(Board *b, int id, const char *desc)
+{
+    Card *card = board_get_card(b, id);
+    if (!card) return -1;
+
+    free(card->description);
+    card->description = desc ? xstrdup(desc) : NULL;
+
+    if (b->db_handle)
+        db_set_card_description((db_t *)b->db_handle, id, desc);
+
+    return 0;
+}
+
+int board_add_label(Board *b, int id, const char *label)
+{
+    Card *card = board_get_card(b, id);
+    if (!card || !label) return -1;
+
+    /* check if label already exists */
+    for (int i = 0; i < card->label_count; i++) {
+        if (card->labels[i] && strcmp(card->labels[i], label) == 0)
+            return 0;  /* already present, success */
+    }
+
+    /* reallocate labels array */
+    char **tmp = realloc(card->labels,
+                         (size_t)(card->label_count + 1) * sizeof(char *));
+    if (!tmp) return -1;
+    card->labels = tmp;
+    card->labels[card->label_count] = xstrdup(label);
+    if (!card->labels[card->label_count]) return -1;
+    card->label_count++;
+
+    if (b->db_handle)
+        db_add_label((db_t *)b->db_handle, id, label);
+
+    return 0;
+}
+
+int board_remove_label(Board *b, int id, const char *label)
+{
+    Card *card = board_get_card(b, id);
+    if (!card || !label) return -1;
+
+    for (int i = 0; i < card->label_count; i++) {
+        if (card->labels[i] && strcmp(card->labels[i], label) == 0) {
+            free(card->labels[i]);
+            /* shift remaining labels down */
+            for (int j = i; j < card->label_count - 1; j++)
+                card->labels[j] = card->labels[j + 1];
+            card->label_count--;
+            card->labels[card->label_count] = NULL; /* safety */
+            break;
+        }
+    }
+
+    if (b->db_handle)
+        db_remove_label((db_t *)b->db_handle, id, label);
+
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Load board from SQLite via db.c                                    */
 /* ------------------------------------------------------------------ */
@@ -270,8 +347,16 @@ static int load_from_db(Board *b, db_t *db)
     int col_counts[3] = {0, 0, 0};
     int *ids[3] = {NULL, NULL, NULL};
     char **titles[3] = {NULL, NULL, NULL};
+    char **descriptions[3] = {NULL, NULL, NULL};
+    char **created_ats[3] = {NULL, NULL, NULL};
+    char **updated_ats[3] = {NULL, NULL, NULL};
+    int *archived_flags[3] = {NULL, NULL, NULL};
+    char ***labels[3] = {NULL, NULL, NULL};
+    int label_counts[3] = {0, 0, 0};
 
-    int rc = db_load_board(db, &b->next_id, col_counts, ids, titles);
+    int rc = db_load_board(db, &b->next_id, col_counts, ids, titles,
+                           descriptions, created_ats, updated_ats,
+                           archived_flags, labels, label_counts);
     if (rc != 0) return -1;
 
     /* Load cards directly into columns — bypass board_add_card to avoid
@@ -285,6 +370,11 @@ static int load_from_db(Board *b, db_t *db)
         if (col_counts[ci] == 0) {
             free(titles[ci]);
             free(ids[ci]);
+            free(descriptions[ci]);
+            free(created_ats[ci]);
+            free(updated_ats[ci]);
+            free(archived_flags[ci]);
+            if (labels[ci]) free(labels[ci]);
             continue;
         }
 
@@ -292,8 +382,15 @@ static int load_from_db(Board *b, db_t *db)
         col->cards = malloc((size_t)col->capacity * sizeof(Card));
         if (!col->cards) {
             for (int j = 0; j < ci; j++) {
-                for (int k = 0; k < b->columns[j].count; k++)
+                for (int k = 0; k < b->columns[j].count; k++) {
                     free(b->columns[j].cards[k].title);
+                    free(b->columns[j].cards[k].description);
+                    free(b->columns[j].cards[k].created_at);
+                    free(b->columns[j].cards[k].updated_at);
+                    for (int li = 0; li < b->columns[j].cards[k].label_count; li++)
+                        free(b->columns[j].cards[k].labels[li]);
+                    free(b->columns[j].cards[k].labels);
+                }
                 free(b->columns[j].cards);
                 b->columns[j].cards = NULL;
                 b->columns[j].count = 0;
@@ -302,18 +399,42 @@ static int load_from_db(Board *b, db_t *db)
             for (int j = ci; j < 3; j++) {
                 for (int k = 0; k < col_counts[j]; k++) free(titles[j][k]);
                 free(titles[j]); free(ids[j]);
+                free(descriptions[j]); free(created_ats[j]);
+                free(updated_ats[j]); free(archived_flags[j]);
+                if (labels[j]) free(labels[j]);
             }
             return -1;
         }
 
         for (int i = 0; i < col_counts[ci]; i++) {
-            col->cards[i].id = ids[ci][i];
-            col->cards[i].title = titles[ci][i];
+            Card *card = &col->cards[i];
+            card->id          = ids[ci][i];
+            card->title       = titles[ci][i];
+            card->description = descriptions[ci] ? descriptions[ci][i] : NULL;
+            card->created_at  = created_ats[ci] ? created_ats[ci][i] : NULL;
+            card->updated_at  = updated_ats[ci] ? updated_ats[ci][i] : NULL;
+            card->archived    = archived_flags[ci] ? archived_flags[ci][i] : 0;
+            card->label_count = 0;
+            card->labels      = NULL;
+
+            /* extract labels from the NULL-terminated array */
+            if (labels[ci] && labels[ci][i]) {
+                char **larr = labels[ci][i];
+                int lc = 0;
+                while (larr[lc]) lc++;
+                card->label_count = lc;
+                card->labels = larr; /* take ownership */
+            }
             col->count++;
         }
 
         free(ids[ci]);
         free(titles[ci]);  /* free the outer pointer array; strings are owned by cards now */
+        free(descriptions[ci]);
+        free(created_ats[ci]);
+        free(updated_ats[ci]);
+        free(archived_flags[ci]);
+        free(labels[ci]);  /* strings are now owned by cards (or were free'd above) */
     }
 
     return rc;
@@ -551,25 +672,73 @@ int board_save(const Board *b, const char *path)
     int col_counts[3];
     int *ids[3];
     char **titles[3];
+    char **descriptions[3];
+    char **created_ats[3];
+    char **updated_ats[3];
+    int *archived_flags[3];
+    char ***labels[3];
 
     for (int ci = 0; ci < 3; ci++) {
         col_counts[ci] = b->columns[ci].count;
         if (col_counts[ci] == 0) {
-            ids[ci] = NULL;
-            titles[ci] = NULL;
+            ids[ci] = NULL; titles[ci] = NULL;
+            descriptions[ci] = NULL;
+            created_ats[ci] = NULL;
+            updated_ats[ci] = NULL;
+            archived_flags[ci] = NULL;
+            labels[ci] = NULL;
             continue;
         }
         ids[ci] = malloc((size_t)col_counts[ci] * sizeof(int));
         titles[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
-        if (!ids[ci] || !titles[ci]) {
-            for (int j = 0; j < ci; j++) { free(ids[j]); free(titles[j]); }
+        descriptions[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
+        created_ats[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
+        updated_ats[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
+        archived_flags[ci] = malloc((size_t)col_counts[ci] * sizeof(int));
+        labels[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
+        if (!ids[ci] || !titles[ci] || !descriptions[ci] ||
+            !created_ats[ci] || !updated_ats[ci] ||
+            !archived_flags[ci] || !labels[ci]) {
+            for (int j = 0; j < ci; j++) {
+                free(ids[j]); free(titles[j]);
+                free(descriptions[j]); free(created_ats[j]);
+                free(updated_ats[j]); free(archived_flags[j]);
+                free(labels[j]);
+            }
+            free(ids[ci]); free(titles[ci]);
+            free(descriptions[ci]); free(created_ats[ci]);
+            free(updated_ats[ci]); free(archived_flags[ci]);
+            free(labels[ci]);
             return -1;
         }
         for (int i = 0; i < col_counts[ci]; i++) {
-            ids[ci][i] = b->columns[ci].cards[i].id;
-            titles[ci][i] = b->columns[ci].cards[i].title;
+            const Card *card = &b->columns[ci].cards[i];
+            ids[ci][i]            = card->id;
+            titles[ci][i]         = card->title;
+            descriptions[ci][i]   = card->description;
+            created_ats[ci][i]    = card->created_at;
+            updated_ats[ci][i]    = card->updated_at;
+            archived_flags[ci][i] = card->archived;
+            /* Build NULL-terminated labels array */
+            if (card->label_count > 0 && card->labels) {
+                char **larr = malloc((size_t)(card->label_count + 1) * sizeof(char *));
+                if (larr) {
+                    for (int li = 0; li < card->label_count; li++)
+                        larr[li] = card->labels[li];
+                    larr[card->label_count] = NULL;
+                }
+                labels[ci][i] = larr;
+            } else {
+                labels[ci][i] = NULL;
+            }
         }
     }
+
+    int label_counts[3] = {
+        b->columns[0].count,  /* dummy — db_save_board ignores this */
+        b->columns[1].count,
+        b->columns[2].count,
+    };
 
     db_t *db = (db_t *)b->db_handle;
     int close_after = 0;
@@ -579,24 +748,53 @@ int board_save(const Board *b, const char *path)
            that create boards from scratch and save without loading) */
         char *db_path = json_to_db_path(path);
         if (!db_path) {
-            for (int ci = 0; ci < 3; ci++) { free(ids[ci]); free(titles[ci]); }
+            for (int ci = 0; ci < 3; ci++) {
+                free(ids[ci]); free(titles[ci]);
+                free(descriptions[ci]); free(created_ats[ci]);
+                free(updated_ats[ci]); free(archived_flags[ci]);
+                if (labels[ci]) {
+                    for (int i = 0; i < col_counts[ci]; i++)
+                        free(labels[ci][i]);
+                    free(labels[ci]);
+                }
+            }
             return -1;
         }
         mkdir_p(db_path);
         db = db_open(db_path);
         free(db_path);
         if (!db) {
-            for (int ci = 0; ci < 3; ci++) { free(ids[ci]); free(titles[ci]); }
+            for (int ci = 0; ci < 3; ci++) {
+                free(ids[ci]); free(titles[ci]);
+                free(descriptions[ci]); free(created_ats[ci]);
+                free(updated_ats[ci]); free(archived_flags[ci]);
+                if (labels[ci]) {
+                    for (int i = 0; i < col_counts[ci]; i++)
+                        free(labels[ci][i]);
+                    free(labels[ci]);
+                }
+            }
             return -1;
         }
         close_after = 1;
     }
 
-    int rc = db_save_board(db, b->next_id, col_counts, ids, titles);
+    int rc = db_save_board(db, b->next_id, col_counts, ids, titles,
+                           descriptions, created_ats, updated_ats,
+                           archived_flags, labels, label_counts);
 
     for (int ci = 0; ci < 3; ci++) {
         free(ids[ci]);
         free(titles[ci]);
+        free(descriptions[ci]);
+        free(created_ats[ci]);
+        free(updated_ats[ci]);
+        free(archived_flags[ci]);
+        if (labels[ci]) {
+            for (int i = 0; i < col_counts[ci]; i++)
+                free(labels[ci][i]);
+            free(labels[ci]);
+        }
     }
 
     if (close_after)

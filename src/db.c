@@ -210,7 +210,13 @@ void db_close(db_t *db)
 /* ------------------------------------------------------------------ */
 
 int db_load_board(db_t *db, int *next_id_out, int col_counts[3],
-                  int *ids[3], char **titles[3])
+                  int *ids[3], char **titles[3],
+                  char **descriptions[3],
+                  char **created_ats[3],
+                  char **updated_ats[3],
+                  int *archived_flags[3],
+                  char ***labels[3],
+                  int label_counts[3])
 {
     if (!db || !db->conn) return -1;
 
@@ -269,6 +275,7 @@ int db_load_board(db_t *db, int *next_id_out, int col_counts[3],
     for (int ci = 0; ci < 3; ci++) {
         int col_id = ci + 1;   /* column ids are 1..3 */
         col_counts[ci] = 0;
+        if (label_counts) label_counts[ci] = 0;
 
         /* first count how many cards */
         rc = sqlite3_prepare_v2(db->conn,
@@ -283,51 +290,168 @@ int db_load_board(db_t *db, int *next_id_out, int col_counts[3],
         if (col_counts[ci] == 0) {
             ids[ci] = NULL;
             titles[ci] = NULL;
+            if (descriptions) descriptions[ci] = NULL;
+            if (created_ats) created_ats[ci] = NULL;
+            if (updated_ats) updated_ats[ci] = NULL;
+            if (archived_flags) archived_flags[ci] = NULL;
+            if (labels) labels[ci] = NULL;
             continue;
         }
 
+        /* allocate arrays for all requested fields */
         ids[ci] = malloc((size_t)col_counts[ci] * sizeof(int));
         titles[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
         if (!ids[ci] || !titles[ci]) {
             for (int j = 0; j < ci; j++) {
                 for (int k = 0; k < col_counts[j]; k++)
                     free(titles[j][k]);
-                free(titles[j]);
-                free(ids[j]);
+                free(titles[j]); free(ids[j]);
             }
-            free(ids[ci]);
-            free(titles[ci]);
-            ids[ci] = NULL;
-            titles[ci] = NULL;
+            free(ids[ci]); free(titles[ci]);
+            ids[ci] = NULL; titles[ci] = NULL;
             return -1;
+        }
+        memset(titles[ci], 0, (size_t)col_counts[ci] * sizeof(char *));
+
+        /* allocate optional arrays */
+        if (descriptions) {
+            descriptions[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
+            if (descriptions[ci])
+                memset(descriptions[ci], 0, (size_t)col_counts[ci] * sizeof(char *));
+        }
+        if (created_ats) {
+            created_ats[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
+            if (created_ats[ci])
+                memset(created_ats[ci], 0, (size_t)col_counts[ci] * sizeof(char *));
+        }
+        if (updated_ats) {
+            updated_ats[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
+            if (updated_ats[ci])
+                memset(updated_ats[ci], 0, (size_t)col_counts[ci] * sizeof(char *));
+        }
+        if (archived_flags) {
+            archived_flags[ci] = malloc((size_t)col_counts[ci] * sizeof(int));
         }
 
         /* load cards ordered by position */
         rc = sqlite3_prepare_v2(db->conn,
-            "SELECT id, title FROM cards "
-            "WHERE column_id = ? ORDER BY position", -1, &stmt, NULL);
+            "SELECT id, title, description, created_at, updated_at, archived "
+            "FROM cards WHERE column_id = ? ORDER BY position", -1, &stmt, NULL);
         if (rc != SQLITE_OK) return -1;
         sqlite3_bind_int(stmt, 1, col_id);
 
         int idx = 0;
         while (sqlite3_step(stmt) == SQLITE_ROW && idx < col_counts[ci]) {
             ids[ci][idx] = sqlite3_column_int(stmt, 0);
-            const char *title =
-                (const char *)sqlite3_column_text(stmt, 1);
-            titles[ci][idx] = title ? xstrdup(title) : xstrdup("");
+            const char *t = (const char *)sqlite3_column_text(stmt, 1);
+            titles[ci][idx] = t ? xstrdup(t) : xstrdup("");
+
+            if (descriptions && descriptions[ci]) {
+                const char *d = (const char *)sqlite3_column_text(stmt, 2);
+                descriptions[ci][idx] = (d && d[0]) ? xstrdup(d) : NULL;
+            }
+            if (created_ats && created_ats[ci]) {
+                const char *ca = (const char *)sqlite3_column_text(stmt, 3);
+                created_ats[ci][idx] = ca ? xstrdup(ca) : NULL;
+            }
+            if (updated_ats && updated_ats[ci]) {
+                const char *ua = (const char *)sqlite3_column_text(stmt, 4);
+                updated_ats[ci][idx] = ua ? xstrdup(ua) : NULL;
+            }
+            if (archived_flags && archived_flags[ci]) {
+                archived_flags[ci][idx] = sqlite3_column_int(stmt, 5);
+            }
             idx++;
         }
         col_counts[ci] = idx;  /* actual loaded count */
         sqlite3_finalize(stmt);
         stmt = NULL;
+
+        /* load labels for cards in this column */
+        if (labels && col_counts[ci] > 0) {
+            /* Build a temp table of card ids for efficient label loading */
+            /* Simple approach: query labels per card_id in a batch via IN clause.
+               We build the list manually since sqlite3 doesn't support arrays. */
+            /* Actually, we'll query labels per card individually for simplicity.
+               For a kanban board this is perfectly fine. */
+            labels[ci] = malloc((size_t)col_counts[ci] * sizeof(char *));
+            if (labels[ci]) {
+                for (int li = 0; li < col_counts[ci]; li++)
+                    labels[ci][li] = NULL;
+            }
+            if (label_counts) label_counts[ci] = 0;
+
+            for (int i = 0; i < col_counts[ci]; i++) {
+                int card_id = ids[ci][i];
+                rc = sqlite3_prepare_v2(db->conn,
+                    "SELECT l.name FROM labels l "
+                    "JOIN card_labels cl ON cl.label_id = l.id "
+                    "WHERE cl.card_id = ? ORDER BY l.name", -1, &stmt, NULL);
+                if (rc != SQLITE_OK) continue;
+                sqlite3_bind_int(stmt, 1, card_id);
+
+                /* Count labels first */
+                int lcount = 0;
+                char **larr = NULL;
+                /* First pass: count */
+                sqlite3_stmt *stmt2 = NULL;
+                rc = sqlite3_prepare_v2(db->conn,
+                    "SELECT COUNT(*) FROM card_labels WHERE card_id = ?",
+                    -1, &stmt2, NULL);
+                if (rc == SQLITE_OK) {
+                    sqlite3_bind_int(stmt2, 1, card_id);
+                    if (sqlite3_step(stmt2) == SQLITE_ROW)
+                        lcount = sqlite3_column_int(stmt2, 0);
+                    sqlite3_finalize(stmt2);
+                }
+
+                if (lcount > 0) {
+                    larr = malloc((size_t)(lcount + 1) * sizeof(char *));
+                    if (larr) {
+                        int li = 0;
+                        while (sqlite3_step(stmt) == SQLITE_ROW && li < lcount) {
+                            const char *ln = (const char *)sqlite3_column_text(stmt, 0);
+                            larr[li] = ln ? xstrdup(ln) : xstrdup("");
+                            li++;
+                        }
+                        larr[li] = NULL;
+                        lcount = li;
+                    }
+                }
+                sqlite3_finalize(stmt);
+                stmt = NULL;
+
+                if (labels[ci])
+                    labels[ci][i] = larr;
+                if (label_counts) {
+                    /* We store the count in a separate array structure.
+                       Since label_counts is just int[3] (total counts per col),
+                       we need per-card counts. Let me use a different approach:
+                       store label_counts as an array-of-arrays.
+                       Actually, the API is int label_counts[3] which is just
+                       total count per column — not per-card.
+                       Let me change approach: make labels[ci][i] a NULL-terminated
+                       array of strings, and the caller counts them.
+                       label_counts[3] becomes the total label count per column. */
+                    label_counts[ci] += lcount;
+                }
+            }
+        }
     }
 
     return 0;
 }
 
 int db_save_board(db_t *db, int next_id, const int col_counts[3],
-                  int *ids[3], char **titles[3])
+                  int *ids[3], char **titles[3],
+                  char **descriptions[3],
+                  char **created_ats[3],
+                  char **updated_ats[3],
+                  int *archived_flags[3],
+                  char ***labels[3],
+                  int label_counts[3])
 {
+    (void)label_counts; /* unused — labels are stored as NULL-terminated arrays */
     if (!db || !db->conn) return -1;
 
     /* wrap in a transaction for speed + atomicity */
@@ -349,7 +473,11 @@ int db_save_board(db_t *db, int next_id, const int col_counts[3],
         if (exec_sql(db->conn, sql) != 0) { exec_sql(db->conn, "ROLLBACK;"); return -1; }
     }
 
-    /* delete all existing cards, then re-insert */
+    /* delete all existing cards, labels first (FK cascade handles it, but be explicit) */
+    if (exec_sql(db->conn, "DELETE FROM card_labels;") != 0) {
+        exec_sql(db->conn, "ROLLBACK;");
+        return -1;
+    }
     if (exec_sql(db->conn, "DELETE FROM cards;") != 0) {
         exec_sql(db->conn, "ROLLBACK;");
         return -1;
@@ -358,18 +486,85 @@ int db_save_board(db_t *db, int next_id, const int col_counts[3],
     for (int ci = 0; ci < 3; ci++) {
         int col_id = ci + 1;
         for (int i = 0; i < col_counts[ci]; i++) {
+            const char *desc  = (descriptions && descriptions[ci]) ? descriptions[ci][i] : "";
+            const char *cat   = (created_ats && created_ats[ci]) ? created_ats[ci][i] : NULL;
+            const char *uat   = (updated_ats && updated_ats[ci]) ? updated_ats[ci][i] : NULL;
+            int arch = (archived_flags && archived_flags[ci]) ? archived_flags[ci][i] : 0;
+
+            /* Build a dynamic INSERT that omits timestamps when they are NULL,
+               letting the DEFAULT (datetime('now')) apply naturally.
+               We use two different INSERT forms to avoid NULL-bind on NOT NULL columns. */
+            const int use_cat = (cat && cat[0]);
+            const int use_uat = (uat && uat[0]);
+            char insert_sql[512];
+            if (use_cat && use_uat) {
+                snprintf(insert_sql, sizeof(insert_sql),
+                    "INSERT INTO cards (id, column_id, title, description, "
+                    "created_at, updated_at, archived, position) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+            } else if (use_cat && !use_uat) {
+                snprintf(insert_sql, sizeof(insert_sql),
+                    "INSERT INTO cards (id, column_id, title, description, "
+                    "created_at, archived, position) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)");
+            } else if (!use_cat && use_uat) {
+                snprintf(insert_sql, sizeof(insert_sql),
+                    "INSERT INTO cards (id, column_id, title, description, "
+                    "updated_at, archived, position) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)");
+            } else {
+                snprintf(insert_sql, sizeof(insert_sql),
+                    "INSERT INTO cards (id, column_id, title, description, "
+                    "archived, position) "
+                    "VALUES (?, ?, ?, ?, ?, ?)");
+            }
+
             sqlite3_stmt *stmt = NULL;
-            int rc = sqlite3_prepare_v2(db->conn,
-                "INSERT INTO cards (id, column_id, title, position) "
-                "VALUES (?, ?, ?, ?)", -1, &stmt, NULL);
+            int rc = sqlite3_prepare_v2(db->conn, insert_sql, -1, &stmt, NULL);
             if (rc != SQLITE_OK) { exec_sql(db->conn, "ROLLBACK;"); return -1; }
             sqlite3_bind_int(stmt, 1, ids[ci][i]);
             sqlite3_bind_int(stmt, 2, col_id);
             sqlite3_bind_text(stmt, 3, titles[ci][i], -1, SQLITE_STATIC);
-            sqlite3_bind_int(stmt, 4, i);
+            sqlite3_bind_text(stmt, 4, desc ? desc : "", -1, SQLITE_STATIC);
+            int bidx = 5;
+            if (use_cat)
+                sqlite3_bind_text(stmt, bidx++, cat, -1, SQLITE_STATIC);
+            if (use_uat)
+                sqlite3_bind_text(stmt, bidx++, uat, -1, SQLITE_STATIC);
+            sqlite3_bind_int(stmt, bidx++, arch);
+            sqlite3_bind_int(stmt, bidx++, i);
             rc = sqlite3_step(stmt);
             sqlite3_finalize(stmt);
             if (rc != SQLITE_DONE) { exec_sql(db->conn, "ROLLBACK;"); return -1; }
+
+            /* save labels */
+            if (labels && labels[ci] && labels[ci][i]) {
+                char **larr = labels[ci][i];
+                for (int li = 0; larr[li]; li++) {
+                    /* ensure label exists in labels table */
+                    sqlite3_stmt *lst = NULL;
+                    rc = sqlite3_prepare_v2(db->conn,
+                        "INSERT OR IGNORE INTO labels (name) VALUES (?)",
+                        -1, &lst, NULL);
+                    if (rc == SQLITE_OK) {
+                        sqlite3_bind_text(lst, 1, larr[li], -1, SQLITE_STATIC);
+                        sqlite3_step(lst);
+                        sqlite3_finalize(lst);
+                    }
+
+                    /* get label id and insert card_label */
+                    rc = sqlite3_prepare_v2(db->conn,
+                        "INSERT OR IGNORE INTO card_labels (card_id, label_id) "
+                        "SELECT ?, id FROM labels WHERE name = ?",
+                        -1, &lst, NULL);
+                    if (rc == SQLITE_OK) {
+                        sqlite3_bind_int(lst, 1, ids[ci][i]);
+                        sqlite3_bind_text(lst, 2, larr[li], -1, SQLITE_STATIC);
+                        sqlite3_step(lst);
+                        sqlite3_finalize(lst);
+                    }
+                }
+            }
         }
     }
 
@@ -494,6 +689,94 @@ int db_edit_card_title(db_t *db, int id, const char *new_title)
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_set_card_description(db_t *db, int id, const char *desc)
+{
+    if (!db || !db->conn) return -1;
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "UPDATE cards SET description = ?, updated_at = datetime('now') "
+        "WHERE id = ?", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, desc ? desc : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, id);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_add_label(db_t *db, int card_id, const char *label)
+{
+    if (!db || !db->conn || !label) return -1;
+
+    /* ensure the label exists in the labels table */
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "INSERT OR IGNORE INTO labels (name) VALUES (?)", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, label, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    /* create the card_label association */
+    rc = sqlite3_prepare_v2(db->conn,
+        "INSERT OR IGNORE INTO card_labels (card_id, label_id) "
+        "SELECT ?, id FROM labels WHERE name = ?", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, card_id);
+    sqlite3_bind_text(stmt, 2, label, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    /* update card's updated_at */
+    if (rc == SQLITE_DONE) {
+        exec_sql(db->conn,
+            "UPDATE cards SET updated_at = datetime('now') WHERE id = ?");
+        /* we don't have the id bound in exec_sql, so use a prepared stmt */
+        sqlite3_stmt *ust = NULL;
+        sqlite3_prepare_v2(db->conn,
+            "UPDATE cards SET updated_at = datetime('now') WHERE id = ?",
+            -1, &ust, NULL);
+        if (ust) {
+            sqlite3_bind_int(ust, 1, card_id);
+            sqlite3_step(ust);
+            sqlite3_finalize(ust);
+        }
+        return 0;
+    }
+    return -1;
+}
+
+int db_remove_label(db_t *db, int card_id, const char *label)
+{
+    if (!db || !db->conn || !label) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "DELETE FROM card_labels "
+        "WHERE card_id = ? AND label_id = (SELECT id FROM labels WHERE name = ?)",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, card_id);
+    sqlite3_bind_text(stmt, 2, label, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc == SQLITE_DONE) {
+        /* update card's updated_at */
+        sqlite3_stmt *ust = NULL;
+        sqlite3_prepare_v2(db->conn,
+            "UPDATE cards SET updated_at = datetime('now') WHERE id = ?",
+            -1, &ust, NULL);
+        if (ust) {
+            sqlite3_bind_int(ust, 1, card_id);
+            sqlite3_step(ust);
+            sqlite3_finalize(ust);
+        }
+        return 0;
+    }
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
