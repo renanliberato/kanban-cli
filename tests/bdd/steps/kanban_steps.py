@@ -6,6 +6,7 @@ content and JSON board file state.
 """
 
 import os
+import shutil
 import time
 import json
 import pexpect
@@ -858,3 +859,57 @@ def step_screen_contains(context, text):
     content = screen_content(context.child, context)
     assert text in content, \
         f"Screen should contain '{text}'. Content:\n{content[-800:]}"
+
+
+# ---------------------------------------------------------------------------
+# Iter4b: shipped agent + multi-line rendering steps
+# ---------------------------------------------------------------------------
+
+@given('the shipped agent "{name}" is installed')
+def step_given_shipped_agent(context, name):
+    """Copy the real shipped agent .md file from the repo into the temp agent home."""
+    # The repo root is the CWD when behave runs (the kanban-cli directory)
+    repo_agents = os.path.join(os.getcwd(), "agents")
+    shipped = os.path.join(repo_agents, f"{name}.md")
+    if os.path.exists(shipped):
+        dest_dir = os.path.join(context.agent_home, ".kanban", "agents")
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy(shipped, os.path.join(dest_dir, f"{name}.md"))
+    else:
+        # Fallback: use setup_agent with a minimal prompt
+        setup_agent(context, name, "comment" if name == "planner" else "description",
+                    f"Default prompt for {name} agent.")
+
+
+@when("I wait for the agent job to complete")
+def step_wait_for_agent_job(context):
+    """Wait for the fake LLM provider to complete its job.
+    With KANBAN_LLM_FAKE_DELAY=10, needs ~10 poll cycles at 100ms each."""
+    # Send idle input to let the main loop poll and process the job.
+    # Each getch() timeout is 100ms; 20 cycles gives 2s buffer.
+    for _ in range(25):
+        context.child.send(" ")
+        time.sleep(0.05)
+    time.sleep(0.5)
+    # Flush screen buffer
+    screen_content(context.child, context)
+
+
+@when('I add a multi-line comment "{body}" on card {card_id:d}')
+def step_add_multiline_comment_cli(context, body, card_id):
+    """Add a comment with embedded newlines directly to the SQLite database.
+    This bypasses the board_save cascade-delete issue (comments table has
+    ON DELETE CASCADE, and board_save does DELETE FROM cards + re-insert)."""
+    import sqlite3
+    body_actual = body.replace("\\n", "\n")
+    # Derive DB path from board path
+    db_path = context.board_path
+    if db_path.endswith(".json"):
+        db_path = db_path[:-5] + ".db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO comments (card_id, author, body) VALUES (?, ?, ?)",
+        (card_id, "test-user", body_actual))
+    conn.commit()
+    conn.close()
+

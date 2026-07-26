@@ -716,9 +716,16 @@ static int wrap_text(const char *text, int width,
     int tlen = (int)strlen(text);
 
     while (pos < tlen && count < max_lines) {
-        /* skip leading newlines */
-        while (pos < tlen && text[pos] == '\n') pos++;
-        if (pos >= tlen) break;
+        /* treat explicit newline as a blank line (paragraph break).
+           skip leading newlines (before any content has been seen). */
+        if (text[pos] == '\n') {
+            if (count > 0 && count < max_lines) {
+                lines[count][0] = '\0';
+                count++;
+            }
+            pos++;
+            continue;
+        }
 
         int line_len = 0;
         int line_start = pos;

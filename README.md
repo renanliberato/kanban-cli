@@ -145,6 +145,91 @@ The JSON format was:
 
 The file is autosaved on every change and on quit. If the file does not exist at startup, an empty board is created.
 
+## AI Agents
+
+Kanban CLI supports configurable AI agents triggered via `@agent-name` mentions in card
+comments. Agents are defined as markdown files with YAML-like frontmatter.
+
+### Config Format
+
+```
+---
+name: agent-name        # required, [a-z0-9-]+
+type: comment|description   # required
+---
+Default prompt body that sets the agent's role, tone, and output format.
+```
+
+### Discovery & Precedence
+
+Agents are loaded from two directories in order:
+
+1. `./.kanban/agents/*.md` — project-local agents
+2. `~/.kanban/agents/*.md` — global (user-level) agents
+
+Project-local agents take precedence on name conflicts.
+
+List discovered agents with:
+```
+kanban agents
+```
+
+### Agent Types
+
+| Type | Behavior |
+|------|----------|
+| `comment` | The LLM response is posted as a new comment authored `@agent-name`. Agents reply in the comment thread. |
+| `description` | The LLM response must be strict JSON `{"title":"...","description":"..."}`. Card title and description are updated. |
+
+### How Triggers Work
+
+Add a comment containing `@agent-name optional message` — either from the TUI (press `c` in
+the card detail view) or via CLI:
+
+```
+kanban comment 1 "@planner break this down into steps"
+```
+
+The agent receives its prompt body, the user message, the card context (title, description,
+labels, full comment thread), board context, and the project directory path. Agent-authored
+comments (author starts with `@`) never re-trigger to prevent infinite loops.
+
+Agents run asynchronously via the LLM job subsystem. For real use, the `opencode` CLI must
+be installed and on PATH. Set `KANBAN_LLM_PROVIDER=fake` to use the in-process fake provider
+for testing (completes after N poll cycles, default delay 1, configurable via
+`KANBAN_LLM_FAKE_DELAY`).
+
+### Shipped Agents
+
+The `agents/` directory in the repository contains 8 ready-to-use planning agents.
+Copy them to your global config:
+
+```
+cp agents/*.md ~/.kanban/agents/
+```
+
+| Agent | Type | Purpose | Example |
+|-------|------|---------|---------|
+| `analyst` | comment | Analytics/tracking coverage review — lists events, funnels, missing metrics | `@analyst what should we track for this?` |
+| `pm` | comment | Product lens — challenges weak framing, asks uncomfortable questions, suggests kill/defer | `@pm is this worth building?` |
+| `planner` | comment | Breaks the task into an ordered implementation plan with dependencies and acceptance criteria | `@planner plan this out` |
+| `risk` | comment | Risk assessment — failure modes, data concerns, rollout strategy, edge cases rated LxI | `@risk what could go wrong?` |
+| `scope` | comment | MVP cut — separates essential from deferrable, proposes smallest shippable version | `@scope cut this down` |
+| `ux` | comment | UX review — end-to-end flow walkthrough, missing states, accessibility, confusing copy | `@ux review the flow` |
+| `writer` | description | Full spec rewrite — incorporates thread decisions into a crisp Problem/Proposal/Criteria/OutOfScope spec | `@writer write this up properly` |
+| `groom` | description | Conservative update — folds thread conclusions into description while preserving original wording | `@groom absorb the thread` |
+
+### Writing Your Own Agent
+
+1. Create a `.md` file in `~/.kanban/agents/` or `./.kanban/agents/`.
+2. Add YAML-like frontmatter with `name` (must match `[a-z0-9-]+`) and `type`.
+3. Write the prompt body below the `---` separator.
+4. Use `kanban agents` to verify discovery.
+
+The prompt body should define the agent's role, output format, and guardrails. Keep it
+provider-agnostic — agents may have access to tools via `opencode run` but must not depend
+on them. Agents plan and analyze; they never write or implement code.
+
 ## Verified On
 
 - **Linux**: Ubuntu 24.04, gcc 13, ncurses 6, Python 3 + pexpect — full CI green.
