@@ -30,6 +30,10 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] Iteration 3 M3: Non-interactive CLI subcommands + AI enrich flow (human-in-the-loop review)
 - [x] Iteration 3 M4: Card detail view, label picker, fuzzy filter
 
+- [ ] Iteration 3 M5: Adaptive layout + undo + archive
+- [ ] Iteration 3 M6: Background jobs polish + multiple boards
+- [ ] Iteration 3 M7: Comments + agent primitives; review flow removal (backlog)
+
 ## Git log so far
 - `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)
 - `8013042` Update STATE.md: M1 checked off, box provisioned
