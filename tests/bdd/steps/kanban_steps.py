@@ -21,6 +21,7 @@ from environment import (
     col_cards,
     screen_content,
     empty_board,
+    setup_agent,
 )
 
 
@@ -90,6 +91,17 @@ def _add_card_to_board(board, title, column_name):
             board["next_id"] += 1
             return
     raise ValueError(f"Unknown column: {column_name}")
+
+
+# ---------------------------------------------------------------------------
+# M7b: Agent Given steps
+# ---------------------------------------------------------------------------
+
+@given('an agent "{name}" of type "{agent_type}"')
+def step_given_agent(context, name, agent_type):
+    """Create an agent .md file for testing."""
+    prompt = f"Default prompt for {name} agent."
+    setup_agent(context, name, agent_type, prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -759,6 +771,8 @@ def _run_cli(context, *args):
     env = os.environ.copy()
     env.setdefault("KANBAN_LLM_PROVIDER", "fake")
     env.setdefault("KANBAN_LLM_FAKE_DELAY", "8")  # faster for CLI tests
+    # M7b: Use agent home for isolated agent config discovery
+    env["HOME"] = getattr(context, "agent_home", env.get("HOME", "/tmp"))
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     context.cli_stdout = result.stdout
     context.cli_stderr = result.stderr
@@ -825,6 +839,19 @@ def step_then_cli_output_not_contains(context, text):
 def step_then_exit_code(context, code):
     assert context.cli_exitcode == code, \
         f"Expected exit code {code}, got {context.cli_exitcode}"
+
+
+# ---------------------------------------------------------------------------
+# M7b: agent-specific steps
+# ---------------------------------------------------------------------------
+
+@when('I comment "{body}" on the last card')
+def step_when_comment_agent(context, body):
+    """Run kanban comment <last_card_id> "<body>" via CLI."""
+    global _last_card_id
+    if _last_card_id is None:
+        raise ValueError("No card has been added yet")
+    _run_cli(context, "comment", str(_last_card_id), body)
 
 
 @step("the card should have a description from AI")

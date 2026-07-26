@@ -5,7 +5,9 @@
 #include "tui.h"
 #include "llm.h"
 #include "enrich.h"
+#include "agent.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +24,7 @@ static int is_subcommand(const char *arg)
 {
     static const char *subs[] = {
         "add", "list", "show", "enrich", "move",
-        "list-boards", "comment", NULL
+        "list-boards", "comment", "agents", NULL
     };
     for (int i = 0; subs[i]; i++) {
         if (strcmp(arg, subs[i]) == 0) return 1;
@@ -460,7 +462,8 @@ static int cmd_move(Board *b, int argc, char **argv, int subcmd_idx)
     return 0;
 }
 
-static int cmd_comment(Board *b, int argc, char **argv, int subcmd_idx)
+static int cmd_comment(Board *b, int argc, char **argv, int subcmd_idx,
+                        const char *db_path)
 {
     if (subcmd_idx + 2 >= argc) {
         fprintf(stderr, "Usage: kanban comment <id> \"text\"\n");
@@ -486,16 +489,179 @@ static int cmd_comment(Board *b, int argc, char **argv, int subcmd_idx)
     const char *author = getenv("USER");
     if (!author || !author[0]) author = "me";
 
+    /* Save comment */
     int rc = board_add_comment(b, id, author, body);
     if (rc != 0) {
         fprintf(stderr, "kanban: failed to add comment to card %d\n", id);
         return 1;
     }
 
-    /* Print the new comment id (we don't have it easily — board_add_comment
-       doesn't return the id, but the operation succeeded). Print card id for
-       scriptability. */
-    printf("%d\n", id);
+    /* Discover agents and scan for @mention */
+    char *kanban_dir = board_path_get_kanban_dir(db_path);
+    int agent_count = 0;
+    Agent *agents = agent_discover(kanban_dir, &agent_count);
+
+    int agent_idx = -1, mention_start, mention_len;
+    if (agents && agent_count > 0 &&
+        agent_scan_mention(body, agents, agent_count,
+                          &agent_idx, &mention_start, &mention_len)) {
+
+        /* Build user message: strip the @mention from the body */
+        char user_msg[2048];
+        int body_len = (int)strlen(body);
+        /* Copy everything before the mention */
+        int pos = 0;
+        if (mention_start > 0) {
+            memcpy(user_msg + pos, body, (size_t)mention_start);
+            pos += mention_start;
+        }
+        /* Copy everything after the mention */
+        if (mention_start + mention_len < body_len) {
+            memcpy(user_msg + pos, body + mention_start + mention_len,
+                   (size_t)(body_len - mention_start - mention_len));
+            pos += body_len - mention_start - mention_len;
+        }
+        user_msg[pos] = '\0';
+
+        /* Trim whitespace */
+        char *trimmed = user_msg;
+        while (*trimmed && isspace((unsigned char)*trimmed)) trimmed++;
+        if (!*trimmed) trimmed = "";
+
+        /* Get column name */
+        const char *col_name_str = "Unknown";
+        for (int ci = 0; ci < MAX_COLUMNS; ci++) {
+            for (int i = 0; i < b->columns[ci].count; i++) {
+                if (b->columns[ci].cards[i].id == id) {
+                    col_name_str = col_name(ci);
+                    break;
+                }
+            }
+        }
+
+        /* Get comments for context */
+        Comment *comments = NULL;
+        int comment_count = 0;
+        board_get_comments(b, id, &comments, &comment_count);
+
+        /* Build prompt */
+        char *prompt = agent_build_prompt(
+            &agents[agent_idx], card,
+            db_path ? board_path_display_name(db_path) : "unknown",
+            kanban_dir, trimmed,
+            comments, comment_count, col_name_str);
+        board_free_comments(comments, comment_count);
+
+        if (prompt) {
+            /* Submit LLM job synchronously */
+            llm_init();
+            int job_id = llm_submit(prompt, id, 0);
+            free(prompt);
+
+            if (job_id >= 0) {
+                /* Poll until done */
+                while (1) {
+                    const LlmJob *job = llm_get_job(job_id);
+                    if (!job) break;
+                    if (job->state == LLM_DONE || job->state == LLM_FAILED ||
+                        job->state == LLM_CANCELLED)
+                        break;
+                    usleep(100000);
+                    llm_poll();
+                }
+
+                const LlmJob *job = llm_get_job(job_id);
+                if (job && job->state == LLM_DONE && job->result && job->result[0]) {
+                    if (agents[agent_idx].type == AGENT_COMMENT) {
+                        /* Add result as a comment authored by @agentname */
+                        char at_author[128];
+                        snprintf(at_author, sizeof(at_author), "@%s",
+                                 agents[agent_idx].name);
+                        board_add_comment(b, id, at_author, job->result);
+                        printf("Agent @%s commented on card %d\n",
+                               agents[agent_idx].name, id);
+                    } else {
+                        /* Description agent — parse JSON, update card */
+                        char *new_title = NULL;
+                        char *new_desc = NULL;
+                        if (agent_parse_description_result(job->result,
+                                                           &new_title, &new_desc) == 0) {
+                            if (new_title)
+                                board_edit_card_title(b, id, new_title);
+                            if (new_desc)
+                                board_set_card_description(b, id, new_desc);
+                            printf("Agent @%s updated card %d\n",
+                                   agents[agent_idx].name, id);
+                            free(new_title);
+                            free(new_desc);
+                        } else {
+                            fprintf(stderr,
+                                    "kanban: agent @%s failed to parse result\n",
+                                    agents[agent_idx].name);
+                            rc = 1;
+                        }
+                    }
+                } else {
+                    const char *reason = "unknown error";
+                    if (job) {
+                        if (job->state == LLM_FAILED && job->result && job->result[0])
+                            reason = job->result;
+                        else if (job->state == LLM_FAILED)
+                            reason = "timeout/error";
+                        else if (job->state == LLM_CANCELLED)
+                            reason = "cancelled";
+                    }
+                    fprintf(stderr,
+                            "kanban: agent @%s failed: %s\n",
+                            agents[agent_idx].name, reason);
+                    rc = 1;
+                }
+            } else {
+                fprintf(stderr, "kanban: failed to submit agent job\n");
+                rc = 1;
+            }
+        }
+    }
+
+    if (agents) agent_free_list(agents, agent_count);
+    free(kanban_dir);
+
+    if (rc == 0)
+        printf("%d\n", id);
+    return rc;
+}
+
+static int cmd_agents(int argc, char **argv, int subcmd_idx,
+                      const char *db_path)
+{
+    (void)argc; (void)argv; (void)subcmd_idx;
+
+    char *kanban_dir = board_path_get_kanban_dir(db_path);
+    int count = 0;
+    Agent *agents = agent_discover(kanban_dir, &count);
+
+    if (!agents || count == 0) {
+        printf("No agents configured.\n");
+        printf("Create .md files in %sagents/ or ~/.kanban/agents/\n",
+               kanban_dir ? "" : "~/.kanban/");
+        printf("Format:\n");
+        printf("  ---\n");
+        printf("  name: agent-name\n");
+        printf("  type: comment|description\n");
+        printf("  ---\n");
+        printf("  Default prompt body...\n");
+    } else {
+        printf("Agents (%d):\n\n", count);
+        for (int i = 0; i < count; i++) {
+            printf("  %s\n", agents[i].name);
+            printf("    type:   %s\n",
+                   agents[i].type == AGENT_COMMENT ? "comment" : "description");
+            printf("    source: %s\n", agents[i].source_path);
+        }
+    }
+
+    agent_free_list(agents, count);
+    free(kanban_dir);
     return 0;
 }
 
@@ -580,7 +746,9 @@ int main(int argc, char **argv)
     } else if (strcmp(subcmd, "move") == 0) {
         ret = cmd_move(&b, argc, argv, subcmd_idx);
     } else if (strcmp(subcmd, "comment") == 0) {
-        ret = cmd_comment(&b, argc, argv, subcmd_idx);
+        ret = cmd_comment(&b, argc, argv, subcmd_idx, path);
+    } else if (strcmp(subcmd, "agents") == 0) {
+        ret = cmd_agents(argc, argv, subcmd_idx, path);
     } else {
         fprintf(stderr, "kanban: unknown subcommand '%s'\n", subcmd);
         ret = 1;

@@ -305,3 +305,25 @@ char *board_path_display_name(const char *db_path)
     }
     return result;
 }
+
+char *board_path_get_kanban_dir(const char *db_path)
+{
+    if (!db_path) return NULL;
+
+    /* Find the last "/.kanban/" in the path.
+       Example: "/home/user/.kanban/default.db" -> find "/.kanban/" */
+    const char *kanban = strstr(db_path, "/.kanban/");
+    if (!kanban) {
+        /* Maybe the path is "<dir>/.kanban" without trailing slash? */
+        kanban = strstr(db_path, "/.kanban");
+        if (!kanban) return NULL;
+    }
+
+    /* The kanban_dir is everything up to and including "/.kanban" */
+    size_t dir_len = (size_t)(kanban - db_path) + 8;  /* "/.kanban" = 8 */
+    char *dir = malloc(dir_len + 1);
+    if (!dir) return NULL;
+    memcpy(dir, db_path, dir_len);
+    dir[dir_len] = '\0';
+    return dir;
+}

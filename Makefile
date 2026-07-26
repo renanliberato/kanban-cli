@@ -18,8 +18,9 @@ TESTLLMBIN = $(BINDIR)/test_llm
 TESTENRICH  = $(BINDIR)/test_enrich
 TESTUNDOBIN = $(BINDIR)/test_undo
 TESTBPTHBIN = $(BINDIR)/test_board_path
+TESTAGENTBIN = $(BINDIR)/test_agent
 
-SRCS       = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/tui.c $(SRCDIR)/llm.c $(SRCDIR)/enrich.c $(SRCDIR)/undo.c $(SRCDIR)/board_path.c \
+SRCS       = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/tui.c $(SRCDIR)/llm.c $(SRCDIR)/enrich.c $(SRCDIR)/undo.c $(SRCDIR)/board_path.c $(SRCDIR)/agent.c \
              $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
 TESTSRCS   = $(TESTDIR)/test_board.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/enrich.c $(SRCDIR)/undo.c \
              $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
@@ -28,6 +29,7 @@ TESTLLMSRCS = $(TESTDIR)/test_llm.c $(SRCDIR)/llm.c
 TESTENRICHSRCS = $(TESTDIR)/test_enrich.c $(SRCDIR)/enrich.c $(VENDOR)/cJSON.c
 TESTUNDOSRCS = $(TESTDIR)/test_undo.c $(SRCDIR)/undo.c
 TESTBPSRCS  = $(TESTDIR)/test_board_path.c $(SRCDIR)/board_path.c $(SRCDIR)/db.c $(VENDOR)/sqlite3.c
+TESTAGENTSRCS = $(TESTDIR)/test_agent.c $(SRCDIR)/agent.c $(SRCDIR)/board_path.c $(SRCDIR)/db.c $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
 
 OBJS       = $(patsubst %.c,$(BUILDDIR)/%.o,$(SRCS))
 TESTOBJS   = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTSRCS))
@@ -36,18 +38,20 @@ TESTLLMOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTLLMSRCS))
 TESTENRICHOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTENRICHSRCS))
 TESTUNDOOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTUNDOSRCS))
 TESTBPOBJS  = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTBPSRCS))
+TESTAGENTOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTAGENTSRCS))
 
 .PHONY: all test clean
 
 all: $(TARGET)
 
-test: $(TESTBIN) $(TESTDBBIN) $(TESTLLMBIN) $(TESTENRICH) $(TESTUNDOBIN) $(TESTBPTHBIN)
+test: $(TESTBIN) $(TESTDBBIN) $(TESTLLMBIN) $(TESTENRICH) $(TESTUNDOBIN) $(TESTBPTHBIN) $(TESTAGENTBIN)
 	./$(TESTBIN)
 	./$(TESTDBBIN)
 	./$(TESTLLMBIN)
 	./$(TESTENRICH)
 	./$(TESTUNDOBIN)
 	./$(TESTBPTHBIN)
+	./$(TESTAGENTBIN)
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lncurses
@@ -68,6 +72,9 @@ $(TESTUNDOBIN): $(TESTUNDOOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(TESTBPTHBIN): $(TESTBPOBJS) | $(BINDIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(TESTAGENTBIN): $(TESTAGENTOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BINDIR):

@@ -3,6 +3,8 @@
 #include "enrich.h"
 #include "db.h"
 #include "undo.h"
+#include "agent.h"
+#include "board_path.h"
 #include <ncurses.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +60,20 @@ static const char g_spinner_chars[] = "|/-\\";
 /* enrich review mode state */
 
 static int  g_enrich_job_id = -1;  /* job we're waiting for in review (M7a: direct-apply on complete) */
+
+/* M7b: agent state */
+static Agent *g_agents = NULL;
+static int    g_agent_count = 0;
+static char  *g_project_kanban_dir = NULL;
+
+#define MAX_AGENT_JOBS 3
+static struct {
+    int        job_id;
+    int        card_id;
+    AgentType  type;
+    char       agent_name[32];
+} g_agent_jobs[MAX_AGENT_JOBS];
+static int g_agent_job_count = 0;
 
 /* detail view state */
 static int  g_detail_mode   = 0;
@@ -1633,6 +1649,92 @@ static void submit_enrich_job(Board *board, int card_id)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* agent: submit an agent job for a @mention in a comment             */
+/* ------------------------------------------------------------------ */
+
+/* Find which column a card is in. Returns column index (0..2) or -1. */
+static int find_card_column(const Board *board, int card_id)
+{
+    for (int ci = 0; ci < MAX_COLUMNS; ci++) {
+        for (int i = 0; i < board->columns[ci].count; i++) {
+            if (board->columns[ci].cards[i].id == card_id)
+                return ci;
+        }
+    }
+    return -1;
+}
+
+static void submit_agent_job(Board *board, int card_id, int agent_idx,
+                             const char *user_message)
+{
+    if (!board || agent_idx < 0 || agent_idx >= g_agent_count) return;
+    if (!user_message) user_message = "";
+
+    /* Check job queue capacity */
+    int running = 0;
+    for (int i = 0; i < llm_job_count(); i++) {
+        const LlmJob *j = llm_job_at(i);
+        if (j && (j->state == LLM_RUNNING || j->state == LLM_QUEUED))
+            running++;
+    }
+    if (running >= 3) {
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Job queue full (max 3)");
+        g_flash_until = time(NULL) + FLASH_DURATION;
+        return;
+    }
+
+    /* Check g_agent_jobs is not full */
+    if (g_agent_job_count >= MAX_AGENT_JOBS) return;
+
+    Card *card = board_get_card(board, card_id);
+    if (!card) return;
+
+    /* Find column name */
+    int col = find_card_column(board, card_id);
+    const char *col_name_str = "Unknown";
+    if (col == COL_TUI_TODO) col_name_str = "To Do";
+    else if (col == COL_TUI_DOING) col_name_str = "Doing";
+    else if (col == COL_TUI_DONE) col_name_str = "Done";
+
+    /* Get comments for context */
+    Comment *comments = NULL;
+    int comment_count = 0;
+    board_get_comments(board, card_id, &comments, &comment_count);
+
+    char *prompt = agent_build_prompt(
+        &g_agents[agent_idx], card,
+        g_board_name ? g_board_name : "unknown",
+        g_project_kanban_dir, user_message,
+        comments, comment_count, col_name_str);
+    board_free_comments(comments, comment_count);
+
+    if (!prompt) return;
+
+    int job_id = llm_submit(prompt, card_id, 0);
+    free(prompt);
+
+    if (job_id >= 0) {
+        /* Track this agent job */
+        g_agent_jobs[g_agent_job_count].job_id = job_id;
+        g_agent_jobs[g_agent_job_count].card_id = card_id;
+        g_agent_jobs[g_agent_job_count].type = g_agents[agent_idx].type;
+        snprintf(g_agent_jobs[g_agent_job_count].agent_name,
+                 sizeof(g_agent_jobs[g_agent_job_count].agent_name),
+                 "%s", g_agents[agent_idx].name);
+        g_agent_job_count++;
+
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Running @%s...", g_agents[agent_idx].name);
+        g_flash_until = time(NULL) + FLASH_DURATION;
+    } else {
+        snprintf(g_flash_buf, sizeof(g_flash_buf),
+                 "Job queue full (max 3)");
+        g_flash_until = time(NULL) + FLASH_DURATION;
+    }
+}
+
 /* ---- label picker management ---- */
 
 static void label_picker_init(Board *board, int card_id)
@@ -1846,9 +1948,47 @@ static int handle_detail_input(Board *board, int ch)
             if (!author || !author[0]) author = "me";
             board_add_comment(board, g_detail_card_id, author, buf);
             autosave(board);
-            snprintf(g_flash_buf, sizeof(g_flash_buf),
-                     "Comment added");
-            g_flash_until = time(NULL) + FLASH_DURATION;
+
+            /* M7b: check for @mention to trigger an agent */
+            int agent_idx = -1, mention_start, mention_len;
+            if (g_agent_count > 0 &&
+                agent_scan_mention(buf, g_agents, g_agent_count,
+                                  &agent_idx, &mention_start, &mention_len)) {
+                /* Build user message: strip the @mention */
+                char user_msg[COMMENT_INPUT_MAX + 1];
+                int body_len = (int)strlen(buf);
+                int pos = 0;
+                if (mention_start > 0) {
+                    memcpy(user_msg + pos, buf, (size_t)mention_start);
+                    pos += mention_start;
+                }
+                if (mention_start + mention_len < body_len) {
+                    memcpy(user_msg + pos, buf + mention_start + mention_len,
+                           (size_t)(body_len - mention_start - mention_len));
+                    pos += body_len - mention_start - mention_len;
+                }
+                user_msg[pos] = '\0';
+                /* Trim leading whitespace */
+                char *trimmed = user_msg;
+                while (*trimmed == ' ') trimmed++;
+                if (!*trimmed) trimmed = "";
+
+                submit_agent_job(board, g_detail_card_id, agent_idx, trimmed);
+            } else if (agent_has_mention(buf, &mention_start, &mention_len)) {
+                /* @mention found but agent not known */
+                char agent_str[64];
+                int name_len = mention_len - 1; /* exclude @ */
+                if (name_len > 60) name_len = 60;
+                memcpy(agent_str, buf + mention_start + 1, (size_t)name_len);
+                agent_str[name_len] = '\0';
+                snprintf(g_flash_buf, sizeof(g_flash_buf),
+                         "No agent named '%s'", agent_str);
+                g_flash_until = time(NULL) + FLASH_DURATION;
+            } else {
+                snprintf(g_flash_buf, sizeof(g_flash_buf),
+                         "Comment added");
+                g_flash_until = time(NULL) + FLASH_DURATION;
+            }
         }
         return 1;
     }
@@ -2449,6 +2589,122 @@ static void check_enrich_completion(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* check agent job completions — M7b                                 */
+/* ------------------------------------------------------------------ */
+
+static void check_agent_completions(void)
+{
+    for (int i = 0; i < g_agent_job_count; i++) {
+        const LlmJob *job = llm_get_job(g_agent_jobs[i].job_id);
+        if (!job) {
+            /* Job vanished — remove from tracking */
+            memmove(&g_agent_jobs[i], &g_agent_jobs[i + 1],
+                    (size_t)(g_agent_job_count - i - 1) * sizeof(g_agent_jobs[0]));
+            g_agent_job_count--;
+            i--;
+            continue;
+        }
+
+        if (job->state == LLM_FAILED || job->state == LLM_CANCELLED) {
+            const char *reason = "unknown";
+            if (job->state == LLM_FAILED && job->result && job->result[0])
+                reason = job->result;
+            else if (job->state == LLM_FAILED)
+                reason = "timeout/error";
+            else
+                reason = "cancelled";
+
+            snprintf(g_flash_buf, sizeof(g_flash_buf),
+                     "@%s failed: %s", g_agent_jobs[i].agent_name, reason);
+            g_flash_until = time(NULL) + FLASH_DURATION;
+
+            /* Remove from tracking */
+            memmove(&g_agent_jobs[i], &g_agent_jobs[i + 1],
+                    (size_t)(g_agent_job_count - i - 1) * sizeof(g_agent_jobs[0]));
+            g_agent_job_count--;
+            i--;
+            continue;
+        }
+
+        if (job->state != LLM_DONE) continue;
+
+        /* Job completed successfully */
+        if (!job->result || !job->result[0]) {
+            snprintf(g_flash_buf, sizeof(g_flash_buf),
+                     "@%s returned empty result",
+                     g_agent_jobs[i].agent_name);
+            g_flash_until = time(NULL) + FLASH_DURATION;
+            memmove(&g_agent_jobs[i], &g_agent_jobs[i + 1],
+                    (size_t)(g_agent_job_count - i - 1) * sizeof(g_agent_jobs[0]));
+            g_agent_job_count--;
+            i--;
+            continue;
+        }
+
+        if (g_agent_jobs[i].type == AGENT_COMMENT) {
+            /* Add result as a comment authored by @agentname */
+            char at_author[64];
+            snprintf(at_author, sizeof(at_author), "@%s",
+                     g_agent_jobs[i].agent_name);
+            board_add_comment(g_board, g_agent_jobs[i].card_id,
+                            at_author, job->result);
+            autosave(g_board);
+
+            snprintf(g_flash_buf, sizeof(g_flash_buf),
+                     "@%s commented", g_agent_jobs[i].agent_name);
+            g_flash_until = time(NULL) + FLASH_DURATION;
+        } else {
+            /* Description agent — parse JSON, update card */
+            char *new_title = NULL;
+            char *new_desc = NULL;
+            if (agent_parse_description_result(job->result,
+                                               &new_title, &new_desc) == 0) {
+                /* Push undo snapshot */
+                Card *card = board_get_card(g_board, g_agent_jobs[i].card_id);
+                if (card) {
+                    UndoOp op;
+                    memset(&op, 0, sizeof(op));
+                    op.type = UNDO_EDIT_DESC;
+                    op.card_id = g_agent_jobs[i].card_id;
+                    op.orig_col = state.sel_col;
+                    op.snap_description = card->description
+                        ? tstrdup(card->description) : NULL;
+                    undo_push(op);
+                }
+
+                if (new_title)
+                    board_edit_card_title(g_board, g_agent_jobs[i].card_id,
+                                         new_title);
+                if (new_desc)
+                    board_set_card_description(g_board, g_agent_jobs[i].card_id,
+                                              new_desc);
+                autosave(g_board);
+                g_undo_pending = 1;
+
+                snprintf(g_flash_buf, sizeof(g_flash_buf),
+                         "@%s updated the task (u to undo)",
+                         g_agent_jobs[i].agent_name);
+                g_flash_until = time(NULL) + FLASH_DURATION;
+
+                free(new_title);
+                free(new_desc);
+            } else {
+                snprintf(g_flash_buf, sizeof(g_flash_buf),
+                         "@%s failed to parse result",
+                         g_agent_jobs[i].agent_name);
+                g_flash_until = time(NULL) + FLASH_DURATION;
+            }
+        }
+
+        /* Remove from tracking */
+        memmove(&g_agent_jobs[i], &g_agent_jobs[i + 1],
+                (size_t)(g_agent_job_count - i - 1) * sizeof(g_agent_jobs[0]));
+        g_agent_job_count--;
+        i--;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* public api                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -2470,6 +2726,11 @@ int tui_run(Board *board, const char *save_path, const char *board_name)
     } while(0)
 
     tui_init();
+
+    /* M7b: load agents */
+    g_project_kanban_dir = board_path_get_kanban_dir(save_path);
+    g_agents = agent_discover(g_project_kanban_dir, &g_agent_count);
+    g_agent_job_count = 0;
 
     timeout(100);
 
@@ -2508,6 +2769,15 @@ int tui_run(Board *board, const char *save_path, const char *board_name)
             for (int i = 0; i < job_count; i++) {
                 const LlmJob *j = llm_job_at(i);
                 if (!j) continue;
+                /* Skip generic flash for agent-tracked jobs */
+                int is_agent = 0;
+                for (int ai = 0; ai < g_agent_job_count; ai++) {
+                    if (g_agent_jobs[ai].job_id == j->id) {
+                        is_agent = 1;
+                        break;
+                    }
+                }
+                if (is_agent) continue;
                 if (j->state == LLM_DONE) {
                     SET_FLASH("Job #%d done (card #%d)",
                               j->id, j->card_id);
@@ -2523,6 +2793,9 @@ int tui_run(Board *board, const char *save_path, const char *board_name)
 
             /* Check for enrich job completion */
             check_enrich_completion();
+
+            /* Check for agent job completions */
+            check_agent_completions();
 
             dirty = 1;
         }
@@ -2566,6 +2839,13 @@ int tui_run(Board *board, const char *save_path, const char *board_name)
     #undef SET_FLASH
 
     tui_shutdown();
+
+    /* M7b: free agent resources */
+    agent_free_list(g_agents, g_agent_count);
+    g_agents = NULL;
+    g_agent_count = 0;
+    free(g_project_kanban_dir);
+    g_project_kanban_dir = NULL;
 
     if (save_path)
         board_save(board, save_path);

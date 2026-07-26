@@ -39,6 +39,9 @@ def spawn_kanban(context, board_path=None, dimensions=(30, 90)):
     # Do NOT override HOME — ncurses may need it for terminfo/configuration.
     # The board path is always passed as a command-line argument.
 
+    # M7b: Use agent home for isolated agent config discovery
+    env["HOME"] = getattr(context, "agent_home", env.get("HOME", "/tmp"))
+
     # Use the fake LLM provider so that BDD tests work without opencode.
     # The fake provider completes in-process after N poll() calls (no fork).
     env.setdefault("KANBAN_LLM_PROVIDER", "fake")
@@ -188,6 +191,10 @@ def before_scenario(context, scenario):
     # child is set by steps that spawn the app
     context.child = None
 
+    # M7b: create a temp HOME for agent config isolation
+    context.agent_home = os.path.join(context.tmpdir, "agent_home")
+    os.makedirs(os.path.join(context.agent_home, ".kanban", "agents"), exist_ok=True)
+
 
 def after_scenario(context, scenario):
     if context.child is not None:
@@ -203,3 +210,13 @@ def after_scenario(context, scenario):
     if tmp and os.path.isdir(tmp):
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def setup_agent(context, name, agent_type, prompt_body):
+    """Create an agent .md file in the temp HOME/.kanban/agents/ directory."""
+    agents_dir = os.path.join(context.agent_home, ".kanban", "agents")
+    os.makedirs(agents_dir, exist_ok=True)
+    filepath = os.path.join(agents_dir, f"{name}.md")
+    content = f"---\nname: {name}\ntype: {agent_type}\n---\n{prompt_body}\n"
+    with open(filepath, "w") as f:
+        f.write(content)

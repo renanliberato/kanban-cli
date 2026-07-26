@@ -33,7 +33,8 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] Iteration 3 M5: Adaptive layout + undo + archive
 - [x] Iteration 3 M6: Background jobs polish + multiple boards
 - [x] Iteration 3 M7a: Task comments + remove enrich review screen
-- [ ] Iteration 3 M7b: Agent config files + @mention triggers (backlog)
+- [x] Iteration 3 M7b: Agent config files + @mention triggers
+- [x] ITERATION 3 COMPLETE — all milestones DONE
 
 ## Git log so far
 - `2abaaf1` M1: project skeleton, board model, JSON persistence, unit tests (11 files, 4261+ lines)

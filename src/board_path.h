@@ -47,4 +47,12 @@ BoardInfo *board_path_list(int *out_count);
  */
 char *board_path_display_name(const char *db_path);
 
+/*
+ * Extract the .kanban/ directory path from a board db path.
+ * E.g., "/home/user/.kanban/default.db" -> "/home/user/.kanban"
+ * Returns malloc'd string, or NULL if the path doesn't contain "/.kanban/".
+ * Caller must free.
+ */
+char *board_path_get_kanban_dir(const char *db_path);
+
 #endif
