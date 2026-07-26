@@ -1,6 +1,5 @@
 #include "tui.h"
 #include "llm.h"
-#include "enrich.h"
 #include "db.h"
 #include "undo.h"
 #include "agent.h"
@@ -56,10 +55,6 @@ static time_t g_flash_until = 0;
 /* spinner state for job-activity indicator */
 static int    g_spinner_idx = 0;
 static const char g_spinner_chars[] = "|/-\\";
-
-/* enrich review mode state */
-
-static int  g_enrich_job_id = -1;  /* job we're waiting for in review (M7a: direct-apply on complete) */
 
 /* M7b: agent state */
 static Agent *g_agents = NULL;
@@ -598,7 +593,7 @@ static void draw_status_bar(int rows)
         }
 
         const char *hint =
-            "q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move  x archive  C-A arch  C-E enrich  / filter  # labels  Enter detail";
+            "q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move  x archive  C-A arch  / filter  # labels  Enter detail";
         int hint_len = (int)strlen(hint);
 
         int available = cols - left_len;
@@ -876,7 +871,7 @@ static void draw_detail_view(const Board *board)
         if (sl_count < MAX_DETAIL_LINES) {
             scroll_lines[sl_count].type = SL_TYPE_TEXT;
             snprintf(scroll_lines[sl_count].text, sizeof(scroll_lines[sl_count].text),
-                     "No description -- press D to add, C-E to enrich");
+                     "No description -- press D to add");
             scroll_lines[sl_count].indent = 4;
             scroll_lines[sl_count].dimmed = 0;
             sl_count++;
@@ -1065,7 +1060,7 @@ static void draw_detail_view(const Board *board)
     if (g_flash_until && time(NULL) < g_flash_until)
         hint = g_flash_buf;
     else
-        hint = " ESC/q=back  t=title  D=desc  l=labels  c=comment  x=archive  C-E=enrich  u=undo  j/k/PgUp/PgDn=scroll ";
+        hint = " ESC/q=back  t=title  D=desc  l=labels  c=comment  x=archive  u=undo  j/k/PgUp/PgDn=scroll ";
     for (int i = 0; i < cols; i++) {
         if (i < (int)strlen(hint))
             addch((unsigned char)hint[i]);
@@ -1605,51 +1600,6 @@ static int confirm(const char *prompt)
 }
 
 /* ------------------------------------------------------------------ */
-/* enrich: submit an enrichment job for a card                        */
-/* ------------------------------------------------------------------ */
-
-static void submit_enrich_job(Board *board, int card_id)
-{
-    Card *card = board_get_card(board, card_id);
-    if (!card) return;
-
-    char *prompt = enrich_build_prompt(card->title, card->description);
-    if (!prompt) return;
-
-    /* Check job queue capacity before submitting */
-    if (llm_job_count() >= 3) {
-        /* Count running jobs */
-        int running = 0;
-        for (int i = 0; i < llm_job_count(); i++) {
-            const LlmJob *j = llm_job_at(i);
-            if (j && (j->state == LLM_RUNNING || j->state == LLM_QUEUED))
-                running++;
-        }
-        if (running >= 3) {
-            snprintf(g_flash_buf, sizeof(g_flash_buf),
-                     "Job queue full (max 3)");
-            g_flash_until = time(NULL) + FLASH_DURATION;
-            free(prompt);
-            return;
-        }
-    }
-
-    int job_id = llm_submit(prompt, card_id, 0);  /* 0 = use default timeout */
-    free(prompt);
-
-    if (job_id >= 0) {
-        g_enrich_job_id = job_id;
-        snprintf(g_flash_buf, sizeof(g_flash_buf),
-                 "Enriching card #%d...", card_id);
-        g_flash_until = time(NULL) + FLASH_DURATION;
-    } else {
-        snprintf(g_flash_buf, sizeof(g_flash_buf),
-                 "Job queue full (max 3)");
-        g_flash_until = time(NULL) + FLASH_DURATION;
-    }
-}
-
-/* ------------------------------------------------------------------ */
 /* agent: submit an agent job for a @mention in a comment             */
 /* ------------------------------------------------------------------ */
 
@@ -2063,10 +2013,6 @@ static int handle_detail_input(Board *board, int ch)
             g_detail_scroll = 0;
         return 1;
 
-    case 5:  /* Ctrl+E */
-        submit_enrich_job(board, g_detail_card_id);
-        return 1;
-
     case KEY_RESIZE:
         return 1;
 
@@ -2257,15 +2203,6 @@ static int handle_input(Board *board, int ch)
         return 1;
     }
 
-    /* Ctrl+E: submit enrich for selected card */
-    if (ch == 5) { /* Ctrl+E */
-        int card_id;
-        if (get_selected_card(board, &card_id) == 0) {
-            submit_enrich_job(board, card_id);
-        }
-        return 1;
-    }
-
     switch (ch) {
 
     /* ---- quit ---- */
@@ -2351,9 +2288,8 @@ static int handle_input(Board *board, int ch)
                 state.sel_card = col_visible_count(board, state.sel_col) - 1;
                 if (state.sel_card < 0) state.sel_card = 0;
                 autosave(board);
-                /* Flash hint for Ctrl+E */
                 snprintf(g_flash_buf, sizeof(g_flash_buf),
-                         "Card #%d added - C-E to enrich with AI", new_id);
+                         "Card #%d added", new_id);
                 g_flash_until = time(NULL) + FLASH_DURATION;
             }
         }
@@ -2495,97 +2431,6 @@ static int handle_input(Board *board, int ch)
     default:
         return 1;
     }
-}
-
-/* ------------------------------------------------------------------ */
-/* check enrich job completion — M7a: direct-apply (no review screen) */
-/* ------------------------------------------------------------------ */
-
-static void check_enrich_completion(void)
-{
-    if (g_enrich_job_id < 0) return;
-
-    const LlmJob *job = llm_get_job(g_enrich_job_id);
-    if (!job) {
-        g_enrich_job_id = -1;
-        return;
-    }
-
-    if (job->state == LLM_FAILED || job->state == LLM_CANCELLED) {
-        if (job->state == LLM_FAILED && job->result && job->result[0]) {
-            snprintf(g_flash_buf, sizeof(g_flash_buf),
-                     "Enrich failed: %s", job->result);
-        } else if (job->state == LLM_CANCELLED) {
-            snprintf(g_flash_buf, sizeof(g_flash_buf),
-                     "Enrich cancelled");
-        } else {
-            snprintf(g_flash_buf, sizeof(g_flash_buf),
-                     "Enrich failed");
-        }
-        g_flash_until = time(NULL) + FLASH_DURATION;
-        g_enrich_job_id = -1;
-        return;
-    }
-
-    if (job->state != LLM_DONE) return;
-
-    /* Job completed — parse result and apply directly (no review screen) */
-    g_enrich_job_id = -1;
-
-    if (!job->result) {
-        snprintf(g_flash_buf, sizeof(g_flash_buf),
-                 "Enrich returned empty result");
-        g_flash_until = time(NULL) + FLASH_DURATION;
-        return;
-    }
-
-    char *inner = enrich_unwrap_envelope(job->result);
-    if (!inner) {
-        snprintf(g_flash_buf, sizeof(g_flash_buf),
-                 "Failed to unwrap enrich result");
-        g_flash_until = time(NULL) + FLASH_DURATION;
-        return;
-    }
-
-    EnrichResult er;
-    if (enrich_parse_result(inner, &er) != 0) {
-        snprintf(g_flash_buf, sizeof(g_flash_buf),
-                 "Failed to parse enrich result");
-        g_flash_until = time(NULL) + FLASH_DURATION;
-        free(inner);
-        return;
-    }
-    free(inner);
-
-    /* Push undo snapshot for description (labels are not undone by undo) */
-    Card *card = board_get_card(g_board, job->card_id);
-    if (card) {
-        UndoOp op;
-        memset(&op, 0, sizeof(op));
-        op.type = UNDO_EDIT_DESC;
-        op.card_id = job->card_id;
-        op.orig_col = state.sel_col;
-        op.snap_description = card->description ? tstrdup(card->description) : NULL;
-        undo_push(op);
-    }
-
-    /* Apply description (overwrite) */
-    if (er.description && er.description[0])
-        board_set_card_description(g_board, job->card_id, er.description);
-
-    /* Merge new labels */
-    for (int li = 0; li < er.label_count; li++) {
-        if (er.labels[li] && er.labels[li][0])
-            board_add_label(g_board, job->card_id, er.labels[li]);
-    }
-
-    enrich_free_result(&er);
-    autosave(g_board);
-
-    g_undo_pending = 1;
-    snprintf(g_flash_buf, sizeof(g_flash_buf),
-             "Enriched (u to undo)");
-    g_flash_until = time(NULL) + FLASH_DURATION;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2790,9 +2635,6 @@ int tui_run(Board *board, const char *save_path, const char *board_name)
                     SET_FLASH("Job #%d cancelled", j->id);
                 }
             }
-
-            /* Check for enrich job completion */
-            check_enrich_completion();
 
             /* Check for agent job completions */
             check_agent_completions();

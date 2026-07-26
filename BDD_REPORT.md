@@ -9,8 +9,8 @@
 
 Every user-facing operation in kanban-cli is specified in plain English via Gherkin
 `.feature` files, executed against the **real ncurses binary** in a pseudo-terminal,
-and gated on every commit. Across 7 milestones (Iteration 2 through Iteration 3 M7b),
-the suite grew from 36 scenarios (10 features) to **79 scenarios (21 features, 441 steps)**.
+and gated on every commit. Across 7 milestones (Iteration 2 through Iteration 3 M7b) and one maintenance milestone (Iter4a),
+the suite grew from 36 scenarios (10 features) to **71 scenarios (19 features, ~400 steps)** after removing the broken enrich feature in Iter4a.
 Zero regressions shipped to `main`.
 
 BDD caught timing bugs, keybinding conflicts, boundary conditions on column edges, and
@@ -20,14 +20,14 @@ project's safety net, not just documentation.
 
 **What BDD bought this project:**
 
-- Every operation (`add`, `edit`, `delete`, `move`, `enrich`, `comment`, `archive`,
+- Every operation (`add`, `edit`, `delete`, `move`, `comment`, `archive`,
   `undo`, `filter`) is verifiably described and tested.
-- AI enrichment flows (Ctrl+E, CLI `--ai`, agent `@mentions`) are deterministic via a
+- AI agent flows (agent `@mentions` in comments) are deterministic via a
   fake LLM provider — no live `opencode` needed in CI.
 - The suite survived two major implementation changes — JSON→SQLite (M1) and review
   screen removal (M7a) — without a single `.feature` file regressing, proving the
   scenarios test *what* the app does, not *how* it stores data or renders dialogs.
-- The gate is `scripts/verify.sh` — zero-warning build + 443 unit asserts + 79
+- The gate is `scripts/verify.sh` — zero-warning build + 386 unit asserts + 71
   behave scenarios. All three must pass before any commit.
 
 ---
@@ -164,10 +164,8 @@ tests/bdd/
     delete_card.feature       (3 scenarios)
     detail_view.feature       (3 scenarios)
     edit_card.feature         (2 scenarios)
-    enrich.feature            (3 scenarios)
     filter.feature            (3 scenarios)
     labels.feature            (2 scenarios)
-    llm_jobs.feature          (3 scenarios)
     move_card.feature         (7 scenarios)
     navigation.feature        (4 scenarios)
     persistence.feature       (2 scenarios)
@@ -194,9 +192,7 @@ tests/bdd/
 | `persistence.feature`     | 2         | Quit + restart preserves board state                        |
 | `quit.feature`            | 4         | Exit code 0, persistence after quit                         |
 | `responsiveness.feature`  | 2         | Terminal size compatibility (80×24, 120×40)                 |
-| `cli.feature`             | 11        | CLI add/list/show/enrich/move, errors, AI enrichment          |
-| `enrich.feature`          | 3         | TUI Ctrl+E enrichment, direct-apply flow                    |
-| `llm_jobs.feature`        | 3         | Async job lifecycle: submit, responsiveness, completion      |
+| `cli.feature`             | 9         | CLI add/list/show/move, errors       |
 | `detail_view.feature`     | 3         | Card detail screen, inline title/description editing        |
 | `labels.feature`          | 2         | Label picker, label persistence                             |
 | `filter.feature`          | 3         | Fuzzy filter, ESC clear, Enter lock                         |
@@ -245,6 +241,7 @@ tests/bdd/
 | **Iter 3 M6** (jobs polish+boards) | `dbdf63c` | 74  | 19       | No new scenarios (polish only). |
 | **Iter 3 M7a** (comments)  | `e90b7fb`   | 76        | 20       | +`comments.feature` (3). Removed enrich-review-screen scenarios, replaced with direct-apply assertions. |
 | **Iter 3 M7b** (agents)    | `31e6c85`   | 79        | 21       | +`agents.feature` (3 scenarios), total steps 441. |
+| **Iter 4a** (enrich removed) | `HEAD`    | 71        | 19       | Removed enrich.feature (3), llm_jobs.feature (3), 2 CLI enrich scenarios. Driven by broken enrich code. |
 
 ### Key Moments
 
@@ -254,12 +251,11 @@ updated to query SQLite instead of parsing JSON, but the Gherkin — the specifi
 *what the app should do* — stayed identical. This is the defining proof that BDD
 scenarios test behaviour, not implementation.
 
-**Review screen removal (M7a):** M3's AI enrich flow included a human-in-the-loop
-review screen (per-field accept/reject). That screen was removed in M7a in favour of
-direct-apply + undo. The `enrich.feature` scenarios were rewritten from "review screen
-shows proposal" assertions to "card should have a description after job completes"
-assertions. The scenarios still validate the high-level behaviour (AI enrichment
-works), not the intermediate UI mechanics.
+**Enrich feature removal (Iter4a):** The full enrich feature (Ctrl+E, CLI `enrich`
+subcommand, `--ai` flag on `kanban add`) was removed as broken. All enrich scenarios
+(in `enrich.feature`, `llm_jobs.feature`, and the two CLI enrich scenarios) were
+removed. The agent subsystem (M7b) continues to use the same LLM job infrastructure
+for description-type agents that update card title and description.
 
 **Adaptive layout (M5):** The `adaptive_layout.feature` scenarios use the
 `I launch the application at 24x50` step (custom pty dimensions). This is a
@@ -278,7 +274,6 @@ calculation is never directly tested — only the resulting screen content.
 | Deleted cards not removed from disk until quit          | `autosave.feature` asserts on-disk state while app is running    |
 | Empty-title "add" leaking a blank card                  | `add_card.feature:20` asserts "keepme" remains, no blank card    |
 | Boundary moves (leftmost→left, rightmost→right) silent  | `move_card.feature:36,40` asserts column contents unchanged      |
-| Ctrl+E enrichment freezing the TUI (pre-M2 fix)         | `llm_jobs.feature:10` asserts navigation works during job        |
 | Filter not clearing on ESC                              | `filter.feature:9` asserts all cards visible after ESC           |
 | Undo not restoring card to original position            | `undo.feature:1` asserts original column content after undo      |
 | Codec errors from ncurses escape sequences              | `codec_errors="replace"` in pexpect spawn; caught mojibake bugs  |
@@ -365,15 +360,15 @@ python3 -m behave tests/bdd -D binary=./bin/kanban --dry-run
 
 | Metric                       | Value |
 |------------------------------|-------|
-| Total `.feature` files       | 21    |
-| Total scenarios              | 79    |
+| Total `.feature` files       | 19    |
+| Total scenarios              | 71    |
 | Scenario Outlines (→ 2 examples) | 1  |
-| Total behave steps executed  | 441   |
-| Python step definitions      | 81    |
-| Unit test assertions (C)     | 443   |
+| Total behave steps executed  | ~400  |
+| Python step definitions      | ~75   |
+| Unit test assertions (C)     | 386   |
 | pexpect timeout per scenario | 8 s   |
 
 ---
 
-*Report generated from `tests/bdd/` on 2026-07-25. Suite last verified on box
-bx_8rz2mckf with all 79 scenarios green and zero build warnings.*
+*Report updated 2026-07-26 after Iter4a enrich removal. Suite last verified on box
+bx_8rz2mckf with all 71 scenarios green and zero build warnings.*

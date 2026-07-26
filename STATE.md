@@ -6,8 +6,8 @@ Read this first after any context compaction. PLAN.md has the full plan.
 
 All 3 iterations delivered and verified. The project is feature-complete.
 
-- **Unit tests:** 443 assertions (board, db, llm, enrich, board_path, agent, undo)
-- **BDD suite:** 79 scenarios, 21 features, 441 steps (behave/gherkin/pexpect)
+- **Unit tests:** 386 assertions (board, db, llm, board_path, agent, undo)
+- **BDD suite:** 71 scenarios, 19 features, ~400 steps (behave/gherkin/pexpect)
 - **Build:** `-Wall -Wextra -std=c99`, zero warnings on gcc 13.3
 - **Reports:** `BOX_REPORT.md` (box usage), `BDD_REPORT.md` (BDD testing methodology)
 - **Verification:** `bash scripts/verify.sh` — clean build + unit tests + BDD
@@ -48,6 +48,7 @@ All 3 iterations delivered and verified. The project is feature-complete.
 - [x] Iteration 3 M7a: Task comments + remove enrich review screen
 - [x] Iteration 3 M7b: Agent config files + @mention triggers
 - [x] ITERATIONS 1–3 COMPLETE — all milestones DONE
+- [x] Iter4a: removed broken enrich feature (Ctrl+E, CLI enrich, enrich module)
 - [x] BOX_REPORT.md written
 - [x] BDD_REPORT.md written
 - [x] Box stopped (bx_8rz2mckf)

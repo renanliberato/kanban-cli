@@ -118,8 +118,8 @@ static void test_submit_poll_done(void)
     ASSERT_EQ(j->state, LLM_DONE, "job is DONE after poll");
     ASSERT_NOTNULL(j->result, "result is non-null");
     ASSERT_TRUE(j->result[0] != '\0', "result is non-empty");
-    ASSERT_TRUE(strstr(j->result, "Fake enrichment") != NULL,
-                "result contains fake enrichment text");
+    ASSERT_TRUE(strstr(j->result, "Fake") != NULL,
+                "result contains fake text");
     ASSERT_TRUE(strstr(j->result, "result") != NULL,
                 "result has envelope wrapper");
 
@@ -316,11 +316,11 @@ static void test_multiple_jobs(void)
     ASSERT_EQ(llm_get_job(id1)->state, LLM_DONE, "multi-job: job 1 DONE");
     ASSERT_EQ(llm_get_job(id2)->state, LLM_DONE, "multi-job: job 2 DONE");
 
-    /* Check results — they should contain enrichment data */
-    ASSERT_TRUE(strstr(llm_get_job(id1)->result, "Fake enrichment") != NULL,
-                "multi-job: job 1 result contains enrichment");
-    ASSERT_TRUE(strstr(llm_get_job(id2)->result, "Fake enrichment") != NULL,
-                "multi-job: job 2 result contains enrichment");
+    /* Check results — they should contain fake data */
+    ASSERT_TRUE(strstr(llm_get_job(id1)->result, "Fake") != NULL,
+                "multi-job: job 1 result contains fake data");
+    ASSERT_TRUE(strstr(llm_get_job(id2)->result, "Fake") != NULL,
+                "multi-job: job 2 result contains fake data");
 
     llm_free();
     unsetenv("KANBAN_LLM_FAKE_DELAY");

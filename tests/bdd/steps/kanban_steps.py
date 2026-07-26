@@ -740,22 +740,6 @@ def step_then_can_navigate_while_job_running(context, key):
     assert context.child.isalive(), "Application should still be alive after navigation"
 
 
-@step("I wait for the job to complete")
-def step_wait_for_job_completion(context):
-    """Wait until the LLM job finishes (status bar returns to normal)."""
-    # With KANBAN_LLM_FAKE_DELAY=10, the job completes after ~1s.
-    # Wait longer to be safe.
-    time.sleep(2.0)
-    # The app should still be alive
-    assert context.child.isalive(), "Application should still be alive"
-    # The status bar should no longer show "running"
-    # Note: after completion the flash message "Done" should appear briefly,
-    # but it may have expired by now. We just verify the TUI is alive.
-    content = screen_content(context.child, context)
-    assert "To Do" in content or "q quit" in content, \
-        f"TUI should be showing the board after job completion. Content:\n{content[-500:]}"
-
-
 # ---------------------------------------------------------------------------
 # CLI steps (non-TUI)
 # ---------------------------------------------------------------------------
@@ -854,25 +838,6 @@ def step_when_comment_agent(context, body):
     _run_cli(context, "comment", str(_last_card_id), body)
 
 
-@step("the card should have a description from AI")
-def step_then_card_has_ai_description(context):
-    """Check that the card (last added) has a non-empty description via SQLite."""
-    import sqlite3
-    db_path = context.board_path.replace(".json", ".db")
-    if not os.path.exists(db_path):
-        # Try without .json ending
-        db_path = context.board_path + ".db"
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    global _last_card_id
-    cur.execute("SELECT description FROM cards WHERE id = ?", (_last_card_id,))
-    row = cur.fetchone()
-    conn.close()
-    assert row is not None, f"Card {_last_card_id} not found"
-    desc = row[0] or ""
-    assert desc != "", f"Expected non-empty description, got empty"
-
-
 @step('I have added cards "{t1}", "{t2}" in "{col}" and "{t3}" in "{col2}"')
 def step_added_cards_distributed(context, t1, t2, col, t3, col2):
     """Add cards via CLI before testing list."""
@@ -885,89 +850,6 @@ def step_added_cards_distributed(context, t1, t2, col, t3, col2):
 def step_added_card_via_cli(context, title, column):
     """Add a single card via CLI."""
     _run_cli(context, "add", title, "--col", column.lower().replace(" ", ""))
-
-
-# ---------------------------------------------------------------------------
-# TUI enrich steps
-# ---------------------------------------------------------------------------
-
-@step("I launch the application with a fresh board")
-def step_launch_fresh(context):
-    """Launch the TUI with an empty board, quitting any existing app first."""
-    if context.child is not None and context.child.isalive():
-        try:
-            context.child.send("q")
-            context.child.expect(pexpect.EOF, timeout=2)
-        except Exception:
-            context.child.terminate(force=True)
-    context.child = None
-    seed_board(context, empty_board())
-    context.child = spawn_kanban(context)
-    context.screen_buffer = ""
-    _reset_selection(context)
-
-
-@step("I press Ctrl+E")
-def step_press_ctrl_e(context):
-    """Send Ctrl+E (ASCII 5) to the application."""
-    context.child.send("\x05")
-    time.sleep(0.1)
-
-
-@step("I wait for the enrich job to complete")
-def step_wait_enrich_job(context):
-    """Wait for the enrich job to finish.
-       With KANBAN_LLM_FAKE_DELAY=10, the fake provider completes in ~1 second.
-       We wait up to 3 seconds for safety."""
-    for _ in range(20):
-        time.sleep(0.15)
-        try:
-            chunk = context.child.read_nonblocking(size=65536, timeout=0.3)
-            buf = getattr(context, "screen_buffer", "")
-            context.screen_buffer = buf + chunk
-        except Exception:
-            pass
-    assert context.child.isalive(), "Application should still be alive"
-
-
-@step('the card "{title}" should have a description')
-def step_card_has_description(context, title):
-    """Check that a card has a non-empty description in the DB."""
-    import sqlite3
-    db_path = context.board_path.replace(".json", ".db")
-    if not os.path.exists(db_path):
-        db_path = context.board_path + ".db"
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT description FROM cards c "
-        "JOIN columns col ON c.column_id = col.id "
-        "WHERE c.title = ?", (title,))
-    row = cur.fetchone()
-    conn.close()
-    assert row is not None, f"Card '{title}' not found in DB"
-    desc = row[0] or ""
-    assert desc != "", f"Expected description for '{title}', got empty"
-
-
-@step('the card "{title}" should not have a description')
-def step_card_no_description(context, title):
-    """Check that a card has no description."""
-    import sqlite3
-    db_path = context.board_path.replace(".json", ".db")
-    if not os.path.exists(db_path):
-        db_path = context.board_path + ".db"
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT description FROM cards c "
-        "JOIN columns col ON c.column_id = col.id "
-        "WHERE c.title = ?", (title,))
-    row = cur.fetchone()
-    conn.close()
-    if row is not None:
-        desc = row[0] or ""
-        assert desc == "", f"Expected no description for '{title}', got '{desc}'"
 
 
 @step('the screen should contain "{text}"')

@@ -398,9 +398,7 @@ static int submit_fake(int slot)
     }
     p->output_buf[0] = '\0';
 
-    /* Pre-build the result: deterministic enrichment JSON.
-       The envelope has a "result" key whose value is the inner JSON
-       that enrich_unwrap_envelope + enrich_parse_result will parse.
+    /* Pre-build the result: deterministic fake JSON for LLM testing.
        Keep the fake output short enough to fit in the buffer. */
     char echo[1024];
     int written = snprintf(echo, sizeof(echo),

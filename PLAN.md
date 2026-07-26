@@ -42,7 +42,7 @@ README.md
 ## Iteration 3 Milestones
 - M1: SQLite storage with JSON auto-migration
 - M2: LLM seam + fake provider
-- M3: CLI subcommands + AI enrich with human-in-the-loop review
+- M3: CLI subcommands + AI enrich with human-in-the-loop review (enrich removed in Iter4a)
 - M4: Card detail view, label picker, fuzzy filter
 - M5: Adaptive narrow layout, undo, archive
 - M6: Background jobs polish + multiple boards (Q&A superseded by M7)

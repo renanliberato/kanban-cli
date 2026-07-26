@@ -16,11 +16,6 @@ Feature: Non-interactive CLI subcommands
     And I run "show" with the last card id
     Then the output should contain "A description"
 
-  Scenario: Add a card with AI enrichment
-    When I run "add" with arguments "enrich me" "--ai"
-    Then the output should contain a numeric ID
-    And the card should have a description from AI
-
   Scenario: List all cards
     Given I have added cards "alpha", "beta" in "To Do" and "gamma" in "Doing"
     When I run "list" with no arguments
@@ -40,12 +35,6 @@ Feature: Non-interactive CLI subcommands
     Then the output should contain "show me"
     And the output should contain "Title"
     And the output should contain "Description"
-
-  Scenario: Enrich an existing card via CLI
-    Given I have added card "enrich via cli" in "To Do"
-    When I run "enrich" with the last card id
-    Then the output should contain "description"
-    And the exit code should be 0
 
   Scenario: Move a card via CLI
     Given I have added card "movable" in "To Do"

@@ -1,5 +1,12 @@
 # Kanban CLI — Iteration 3 Design
 
+> **Iter4a (2026-07-26):** The enrich feature (#3 in the ranking below) was
+> removed as broken.  Ctrl+E keybinding, `kanban enrich` CLI subcommand, and
+> `--ai` flag on `kanban add` are all gone.  The agent subsystem (M7b,
+> description-type agents) still uses the LLM job infrastructure to update
+> card title and description via `agent_parse_description_result()` — that
+> path was fully independent of the enrich module.
+
 ## Part 1 — Ranked Feature List
 
 | # | Feature | Pitch | UX Sketch | Why It Earns Its Place | Cost |

@@ -4,7 +4,6 @@
 #include "board_path.h"
 #include "tui.h"
 #include "llm.h"
-#include "enrich.h"
 #include "agent.h"
 
 #include <ctype.h>
@@ -23,7 +22,7 @@
 static int is_subcommand(const char *arg)
 {
     static const char *subs[] = {
-        "add", "list", "show", "enrich", "move",
+        "add", "list", "show", "move",
         "list-boards", "comment", "agents", NULL
     };
     for (int i = 0; subs[i]; i++) {
@@ -162,7 +161,6 @@ static int cmd_list_boards(void)
 static int cmd_add(Board *b, int argc, char **argv, int subcmd_idx)
 {
     int col       = COL_TODO;   /* default */
-    int use_ai    = 0;
     const char *title   = NULL;
     const char *desc    = NULL;
 
@@ -183,8 +181,6 @@ static int cmd_add(Board *b, int argc, char **argv, int subcmd_idx)
                 fprintf(stderr, "kanban: invalid column '%s' (use todo, doing, or done)\n", argv[i]);
                 return 1;
             }
-        } else if (strcmp(argv[i], "--ai") == 0) {
-            use_ai = 1;
         } else if (strcmp(argv[i], "--desc") == 0 && i + 1 < argc) {
             desc = argv[++i];
         } else if (argv[i][0] == '-') {
@@ -196,7 +192,7 @@ static int cmd_add(Board *b, int argc, char **argv, int subcmd_idx)
     }
 
     if (!title) {
-        fprintf(stderr, "Usage: kanban add \"title\" [--col todo|doing|done] [--ai] [--desc \"text\"]\n");
+        fprintf(stderr, "Usage: kanban add \"title\" [--col todo|doing|done] [--desc \"text\"]\n");
         return 1;
     }
 
@@ -209,55 +205,6 @@ static int cmd_add(Board *b, int argc, char **argv, int subcmd_idx)
     /* Apply description if provided */
     if (desc && desc[0]) {
         board_set_card_description(b, id, desc);
-    }
-
-    /* AI enrich flow (synchronous, auto-accept).
-       Non-interactive CLI cannot present a review screen, so accepted
-       enrich results are applied directly.  The TUI flow (Ctrl+E) is
-       the human-in-the-loop path. */
-    if (use_ai) {
-        /* Quick initialise LLM if not already done */
-        llm_init();
-
-        char *prompt = enrich_build_prompt(title, desc);
-        if (!prompt) {
-            fprintf(stderr, "kanban: failed to build enrich prompt\n");
-        } else {
-            int job_id = llm_submit(prompt, id, 0);  /* 0 = use default timeout */
-            free(prompt);
-
-            if (job_id < 0) {
-                fprintf(stderr, "kanban: failed to submit enrich job\n");
-            } else {
-                /* Poll synchronously until job completes */
-                while (1) {
-                    const LlmJob *job = llm_get_job(job_id);
-                    if (!job) break;
-                    if (job->state == LLM_DONE || job->state == LLM_FAILED ||
-                        job->state == LLM_CANCELLED)
-                        break;
-                    usleep(100000);  /* 100ms */
-                    llm_poll();
-                }
-
-                const LlmJob *job = llm_get_job(job_id);
-                if (job && job->state == LLM_DONE && job->result) {
-                    char *inner = enrich_unwrap_envelope(job->result);
-                    if (inner) {
-                        EnrichResult er;
-                        if (enrich_parse_result(inner, &er) == 0) {
-                            /* Auto-accept: apply to card */
-                            if (er.description)
-                                board_set_card_description(b, id, er.description);
-                            for (int li = 0; li < er.label_count; li++)
-                                board_add_label(b, id, er.labels[li]);
-                            enrich_free_result(&er);
-                        }
-                        free(inner);
-                    }
-                }
-            }
-        }
     }
 
     /* Print the new card id */
@@ -341,99 +288,6 @@ static int cmd_show(const Board *b, int argc, char **argv, int subcmd_idx)
     }
     board_free_comments(comments, comment_count);
 
-    return 0;
-}
-
-static int cmd_enrich(Board *b, int argc, char **argv, int subcmd_idx)
-{
-    if (subcmd_idx + 1 >= argc) {
-        fprintf(stderr, "Usage: kanban enrich <id>\n");
-        return 1;
-    }
-
-    int id = atoi(argv[subcmd_idx + 1]);
-    Card *card = board_get_card(b, id);
-    if (!card) {
-        fprintf(stderr, "kanban: card %d not found\n", id);
-        return 1;
-    }
-
-    llm_init();
-
-    char *prompt = enrich_build_prompt(card->title, card->description);
-    if (!prompt) {
-        fprintf(stderr, "kanban: failed to build enrich prompt\n");
-        return 1;
-    }
-
-    int job_id = llm_submit(prompt, id, 0);  /* 0 = use default timeout */
-    free(prompt);
-
-    if (job_id < 0) {
-        fprintf(stderr, "kanban: failed to submit enrich job (queue full?)\n");
-        return 1;
-    }
-
-    /* Poll synchronously */
-    while (1) {
-        const LlmJob *job = llm_get_job(job_id);
-        if (!job) break;
-        if (job->state == LLM_DONE || job->state == LLM_FAILED ||
-            job->state == LLM_CANCELLED)
-            break;
-        usleep(100000);
-        llm_poll();
-    }
-
-    const LlmJob *job = llm_get_job(job_id);
-    if (!job || job->state != LLM_DONE || !job->result) {
-        const char *reason = "unknown";
-        if (job) {
-            if (job->state == LLM_FAILED && job->result && job->result[0])
-                reason = job->result;
-            else if (job->state == LLM_FAILED)
-                reason = "timeout/error";
-            else if (job->state == LLM_CANCELLED)
-                reason = "cancelled";
-        }
-        fprintf(stderr, "kanban: enrich job failed (%s)\n", reason);
-        return 1;
-    }
-
-    /* Unwrap and print the proposed enrichment JSON */
-    char *inner = enrich_unwrap_envelope(job->result);
-    if (!inner) {
-        fprintf(stderr, "kanban: failed to unwrap enrich result\n");
-        return 1;
-    }
-
-    /* Print the parsed result as JSON for scriptability */
-    EnrichResult er;
-    if (enrich_parse_result(inner, &er) == 0) {
-        printf("{\n");
-        printf("  \"description\": \"%s\"", er.description ? er.description : "");
-        printf(",\n");
-        printf("  \"labels\": [");
-        for (int i = 0; i < er.label_count; i++) {
-            if (i > 0) printf(", ");
-            printf("\"%s\"", er.labels[i]);
-        }
-        printf("],\n");
-        printf("  \"questions\": [\n");
-        for (int i = 0; i < er.question_count; i++) {
-            if (i > 0) printf(",\n");
-            printf("    {\"q\": \"%s\", \"a\": \"%s\"}",
-                   er.questions[i], er.answers[i]);
-        }
-        printf("\n  ]\n");
-        printf("}\n");
-        enrich_free_result(&er);
-    } else {
-        /* Just print the raw unwrapped output */
-        printf("%s\n", inner);
-    }
-
-    free(inner);
     return 0;
 }
 
@@ -741,8 +595,6 @@ int main(int argc, char **argv)
         ret = cmd_list(&b, argc, argv, subcmd_idx);
     } else if (strcmp(subcmd, "show") == 0) {
         ret = cmd_show(&b, argc, argv, subcmd_idx);
-    } else if (strcmp(subcmd, "enrich") == 0) {
-        ret = cmd_enrich(&b, argc, argv, subcmd_idx);
     } else if (strcmp(subcmd, "move") == 0) {
         ret = cmd_move(&b, argc, argv, subcmd_idx);
     } else if (strcmp(subcmd, "comment") == 0) {
