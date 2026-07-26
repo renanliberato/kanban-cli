@@ -339,6 +339,71 @@ int board_remove_label(Board *b, int id, const char *label)
 }
 
 /* ------------------------------------------------------------------ */
+/* archive / unarchive (M5)                                           */
+/* ------------------------------------------------------------------ */
+
+int board_set_card_archived(Board *b, int id, int archived)
+{
+    Card *card = board_get_card(b, id);
+    if (!card) return -1;
+
+    int old = card->archived;
+    card->archived = archived ? 1 : 0;
+
+    /* incremental db update: only if changed.
+       db_set_card_archived is not available, so we do a full update
+       via a separate db call that updates the archived flag. */
+    (void)old;
+
+    if (b->db_handle)
+        db_set_card_archived((db_t *)b->db_handle, id, card->archived);
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* restore a deleted card (undo support, M5)                          */
+/* ------------------------------------------------------------------ */
+
+int board_restore_card(Board *b, int id, int col, int pos,
+                       const char *title, const char *desc,
+                       int archived)
+{
+    if (col < 0 || col >= MAX_COLUMNS || !title) return -1;
+
+    Column *c = &b->columns[col];
+    if (col_ensure_capacity(c) != 0) return -1;
+
+    /* clamp pos */
+    if (pos < 0) pos = 0;
+    if (pos > c->count) pos = c->count;
+
+    /* shift cards down to make room */
+    for (int i = c->count; i > pos; i--)
+        c->cards[i] = c->cards[i - 1];
+
+    /* zero-initialize the slot */
+    memset(&c->cards[pos], 0, sizeof(Card));
+
+    c->cards[pos].id          = id;
+    c->cards[pos].title       = xstrdup(title);
+    c->cards[pos].description = desc ? xstrdup(desc) : NULL;
+    c->cards[pos].archived    = archived;
+    c->cards[pos].labels      = NULL;
+    c->cards[pos].label_count = 0;
+    c->count++;
+
+    /* ensure next_id is beyond this id */
+    if (id >= b->next_id) b->next_id = id + 1;
+
+    /* db: insert the card (NOT via db_add_card which would auto-increment) */
+    if (b->db_handle)
+        db_restore_card((db_t *)b->db_handle, col, id, title, desc, archived);
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* labels helpers                                                     */
 /* ------------------------------------------------------------------ */
 

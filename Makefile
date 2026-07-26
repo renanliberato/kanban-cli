@@ -12,34 +12,38 @@ BINDIR   = bin
 BUILDDIR = build
 
 TARGET     = $(BINDIR)/kanban
-TESTBIN    = $(BINDIR)/test_board
+TESTBIN     = $(BINDIR)/test_board
 TESTDBBIN  = $(BINDIR)/test_db
 TESTLLMBIN = $(BINDIR)/test_llm
 TESTENRICH  = $(BINDIR)/test_enrich
+TESTUNDOBIN = $(BINDIR)/test_undo
 
-SRCS       = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/tui.c $(SRCDIR)/llm.c $(SRCDIR)/enrich.c \
+SRCS       = $(SRCDIR)/main.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/tui.c $(SRCDIR)/llm.c $(SRCDIR)/enrich.c $(SRCDIR)/undo.c \
              $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
-TESTSRCS   = $(TESTDIR)/test_board.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/enrich.c \
+TESTSRCS   = $(TESTDIR)/test_board.c $(SRCDIR)/board.c $(SRCDIR)/db.c $(SRCDIR)/enrich.c $(SRCDIR)/undo.c \
              $(VENDOR)/cJSON.c $(VENDOR)/sqlite3.c
 TESTDBSRCS = $(TESTDIR)/test_db.c $(SRCDIR)/db.c $(VENDOR)/sqlite3.c
 TESTLLMSRCS = $(TESTDIR)/test_llm.c $(SRCDIR)/llm.c
 TESTENRICHSRCS = $(TESTDIR)/test_enrich.c $(SRCDIR)/enrich.c $(VENDOR)/cJSON.c
+TESTUNDOSRCS = $(TESTDIR)/test_undo.c $(SRCDIR)/undo.c
 
 OBJS       = $(patsubst %.c,$(BUILDDIR)/%.o,$(SRCS))
 TESTOBJS   = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTSRCS))
 TESTDBOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTDBSRCS))
 TESTLLMOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTLLMSRCS))
 TESTENRICHOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTENRICHSRCS))
+TESTUNDOOBJS = $(patsubst %.c,$(BUILDDIR)/%.o,$(TESTUNDOSRCS))
 
 .PHONY: all test clean
 
 all: $(TARGET)
 
-test: $(TESTBIN) $(TESTDBBIN) $(TESTLLMBIN) $(TESTENRICH)
+test: $(TESTBIN) $(TESTDBBIN) $(TESTLLMBIN) $(TESTENRICH) $(TESTUNDOBIN)
 	./$(TESTBIN)
 	./$(TESTDBBIN)
 	./$(TESTLLMBIN)
 	./$(TESTENRICH)
+	./$(TESTUNDOBIN)
 
 $(TARGET): $(OBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lncurses
@@ -54,6 +58,9 @@ $(TESTLLMBIN): $(TESTLLMOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(TESTENRICH): $(TESTENRICHOBJS) | $(BINDIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(TESTUNDOBIN): $(TESTUNDOOBJS) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BINDIR):

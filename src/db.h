@@ -54,4 +54,9 @@ int   db_has_migration(db_t *db, int version);
 int   db_get_all_labels(db_t *db, char ***names_out, int *count_out);
 int   db_get_card_labels(db_t *db, int card_id, char ***names_out, int *count_out);
 
+/* M5: archive/unarchive and restore for undo */
+int   db_set_card_archived(db_t *db, int id, int archived);
+int   db_restore_card(db_t *db, int col, int id, const char *title,
+                     const char *desc, int archived);
+
 #endif

@@ -2,6 +2,7 @@
 #include "llm.h"
 #include "enrich.h"
 #include "db.h"
+#include "undo.h"
 #include <ncurses.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,10 +13,21 @@
 /* ------------------------------------------------------------------ */
 
 static void autosave(const Board *board);
+
+/* portable strdup (c99 compat) */
+static char *tstrdup(const char *s)
+{
+    if (!s) return NULL;
+    size_t len = strlen(s);
+    char *copy = malloc(len + 1);
+    if (copy) memcpy(copy, s, len + 1);
+    return copy;
+}
 /* ------------------------------------------------------------------ */
 
-#define MIN_ROWS            20
-#define MIN_COLS            60
+#define MIN_ROWS            10
+#define MIN_COLS            30
+#define NARROW_THRESHOLD    60    /* < 60 cols -> single-column narrow mode */
 #define INPUT_MAX           128
 #define FLASH_DURATION       2    /* seconds flash message stays visible */
 #define REVIEW_FIELD_MAX    32   /* max fields in review screen */
@@ -74,6 +86,12 @@ static int  g_label_picker_toggled[LABEL_PICKER_MAX];
 static char g_filter_buf[FILTER_MAX];
 static int  g_filter_len = 0;
 static int  g_filter_active = 0;  /* 0=no filter, 1=entering filter, 2=active filter */
+
+/* archive visibility (M5) */
+static int  g_show_archived = 0;  /* 0=hide archived, 1=show (dimmed) */
+
+/* undo pending flash (M5) */
+static int  g_undo_pending = 0;   /* set after destructive op */
 
 /* color-pair ids */
 enum {
@@ -157,16 +175,30 @@ static int card_matches_filter(const Board *board, const Card *card)
     return fuzzy_match(g_filter_buf, n, strings);
 }
 
-/* Count visible cards in a column under current filter */
+/* Count visible cards in a column under current filter AND archive setting */
 static int col_visible_count(const Board *board, int ci)
 {
     const Column *col = &board->columns[ci];
     int visible = 0;
     for (int i = 0; i < col->count; i++) {
+        if (!g_show_archived && col->cards[i].archived)
+            continue;
         if (card_matches_filter(board, &col->cards[i]))
             visible++;
     }
     return visible;
+}
+
+/* Count archived cards in a column */
+static int col_archived_count(const Board *board, int ci)
+{
+    const Column *col = &board->columns[ci];
+    int count = 0;
+    for (int i = 0; i < col->count; i++) {
+        if (col->cards[i].archived)
+            count++;
+    }
+    return count;
 }
 
 /* Find the nth visible card index in a column (0-based), return -1 if not found */
@@ -175,6 +207,8 @@ static int col_visible_index(const Board *board, int ci, int n)
     const Column *col = &board->columns[ci];
     int seen = 0;
     for (int i = 0; i < col->count; i++) {
+        if (!g_show_archived && col->cards[i].archived)
+            continue;
         if (card_matches_filter(board, &col->cards[i])) {
             if (seen == n) return i;
             seen++;
@@ -210,12 +244,25 @@ static const char *make_header(const Board *board, int col_idx)
     const char *name = column_names[col_idx];
     int total = board->columns[col_idx].count;
 
+    /* archived hint for Done column */
+    int arch = col_archived_count(board, col_idx);
+    int has_arch = (arch > 0 && col_idx == COL_TUI_DONE) ? 1 : 0;
+
     if (g_filter_len > 0) {
         int shown = col_visible_count(board, col_idx);
-        int n = snprintf(buf, sizeof(buf), "%s (%d/%d)", name, shown, total);
+        int n;
+        if (has_arch && !g_show_archived)
+            n = snprintf(buf, sizeof(buf), "%s (%d/%d, %d arch)", name, shown, total, arch);
+        else
+            n = snprintf(buf, sizeof(buf), "%s (%d/%d)", name, shown, total);
         if (n < 0) return name;
     } else {
-        int n = snprintf(buf, sizeof(buf), "%s (%d)", name, total);
+        int shown = col_visible_count(board, col_idx);
+        int n;
+        if (has_arch && !g_show_archived)
+            n = snprintf(buf, sizeof(buf), "%s (%d, %d arch)", name, shown, arch);
+        else
+            n = snprintf(buf, sizeof(buf), "%s (%d)", name, shown);
         if (n < 0) return name;
     }
     return buf;
@@ -228,25 +275,47 @@ static void draw_card(int y, int x, const char *title, int width, int selected,
     int len = (int)strlen(title);
     int usable = width - 1;
 
+    int is_archived = card ? card->archived : 0;
+
     move(y, x);
     if (selected && has_color)
         attron(COLOR_PAIR(PAIR_SELECTED));
     else if (selected)
         attron(A_REVERSE);
+    else if (is_archived && !g_show_archived)
+        ; /* hidden cards aren't drawn */
+    else if (is_archived && has_color)
+        attron(A_DIM);
 
     addch(' ');
+
+    if (is_archived) {
+        /* prepend "[archived] " prefix — but only if we have space */
+        const char *prefix = "[archived] ";
+        int plen = (int)strlen(prefix);
+        if (usable > plen + 2) {
+            for (int i = 0; i < plen; i++)
+                addch((unsigned char)prefix[i]);
+            usable -= plen;
+        }
+        /* also reduce title to fit */
+        if (len > usable) {
+            len = usable - 1;  /* leave room for ~ */
+            if (len < 0) len = 0;
+        }
+    }
 
     /* Compute available space for title + labels */
     int tags_space = 0;
     if (card && card->label_count > 0) {
-        /* estimate: each tag is [name] + space = len(name)+3 */
         for (int li = 0; li < card->label_count; li++) {
             int tlen = card->labels[li] ? (int)strlen(card->labels[li]) : 0;
-            tags_space += tlen + 3;  /* [x] + space */
+            tags_space += tlen + 3;
         }
     }
     int title_space = usable - tags_space;
     if (title_space < 2) title_space = 2;
+    if (title_space > len) title_space = len;
 
     if (len <= title_space) {
         for (int i = 0; i < len; i++)
@@ -267,9 +336,11 @@ static void draw_card(int y, int x, const char *title, int width, int selected,
             attroff(COLOR_PAIR(PAIR_SELECTED));
         else
             attroff(A_REVERSE);
+    } else if (is_archived && has_color) {
+        attroff(A_DIM);
     }
 
-    /* Draw label tags (after title, in the remaining space, without selection highlight) */
+    /* Draw label tags */
     if (card && card->label_count > 0 && tags_space > 0) {
         int cx = x + 1 + title_space;
         if (cx < x + width) {
@@ -279,9 +350,6 @@ static void draw_card(int y, int x, const char *title, int width, int selected,
                 if (!lname || !lname[0]) continue;
                 int tlen = (int)strlen(lname);
                 if (tlen + 3 > remaining) {
-                    /* truncated tag */
-                    int show = remaining - 3;
-                    if (show < 1) break;
                     draw_label_tag(y, cx, lname);
                     cx += remaining;
                     break;
@@ -289,7 +357,6 @@ static void draw_card(int y, int x, const char *title, int width, int selected,
                 draw_label_tag(y, cx, lname);
                 cx += tlen + 3;
                 remaining -= (tlen + 3);
-                /* add a space between tags */
                 move(y, cx);
                 addch(' ');
                 cx++;
@@ -490,8 +557,22 @@ static void draw_status_bar(int rows)
             if (n > 0) left_len += n;
         }
 
+        /* show archive mode if active (M5) */
+        if (g_show_archived) {
+            int n = snprintf(left + left_len, sizeof(left) - (size_t)left_len,
+                             "[archives]  ");
+            if (n > 0) left_len += n;
+        }
+
+        /* show undo pending (M5) */
+        if (g_undo_pending) {
+            int n = snprintf(left + left_len, sizeof(left) - (size_t)left_len,
+                             "Undo? (u)  ");
+            if (n > 0) left_len += n;
+        }
+
         const char *hint =
-            "q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move  C-E enrich  / filter  # labels  Enter detail";
+            "q quit  |  hjkl navigate  |  a add  e edit  d del  H/L move  x archive  C-A arch  C-E enrich  / filter  # labels  Enter detail";
         int hint_len = (int)strlen(hint);
 
         int available = cols - left_len;
@@ -795,7 +876,7 @@ static void draw_detail_view(const Board *board)
     move(rows - 1, 0);
     if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
     else attron(A_REVERSE);
-    const char *hint = " ESC/q=back  t=edit title  D=edit desc  l=labels  j/k/PgUp/PgDn=scroll ";
+    const char *hint = " ESC/q=back  t=edit title  D=edit desc  l=labels  x=archive  u=undo  j/k/PgUp/PgDn=scroll ";
     for (int i = 0; i < cols; i++) {
         if (i < (int)strlen(hint))
             addch((unsigned char)hint[i]);
@@ -1096,6 +1177,239 @@ static int handle_review_input(Board *board, int ch)
     }
 }
 
+/* ---- narrow mode (single-column) draw ---- */
+
+static void draw_narrow_border(int y, int cw, int cols)
+{
+    (void)cw;
+    move(y, 0);
+    addch(ACS_ULCORNER);
+    for (int i = 0; i < cols - 2; i++)
+        addch(ACS_HLINE);
+    addch(ACS_URCORNER);
+}
+
+static void draw_narrow_separator(int y, int cols)
+{
+    move(y, 0);
+    addch(ACS_LTEE);
+    for (int i = 0; i < cols - 2; i++)
+        addch(ACS_HLINE);
+    addch(ACS_RTEE);
+}
+
+static void draw_narrow_bottom(int y, int cols)
+{
+    move(y, 0);
+    addch(ACS_LLCORNER);
+    for (int i = 0; i < cols - 2; i++)
+        addch(ACS_HLINE);
+    addch(ACS_LRCORNER);
+}
+
+static void draw_narrow_headers(int y, int cols, const Board *board)
+{
+    int ci = state.sel_col;  /* active (visible) column */
+    (void)cols;  /* used below via cols param */
+
+    /* Draw all three column names + counters in one header bar,
+       with the active one highlighted. */
+    char line[256];
+    int line_len = 0;
+
+    for (int i = 0; i < 3; i++) {
+        const char *hdr = make_header(board, i);
+        int hdr_len = (int)strlen(hdr);
+
+        /* compute segment: "[ hdr ]" for active, "  hdr  " for inactive */
+        int seg_len;
+        if (i == ci) {
+            seg_len = hdr_len + 4;  /* [ HDR ] */
+        } else {
+            seg_len = hdr_len + 2;  /* " HDR " */
+        }
+        if (line_len + seg_len + 1 >= (int)sizeof(line)) break;
+        if (i > 0) {
+            line[line_len++] = ' ';
+        }
+
+        int start = line_len;
+        /* write hdr into line buffer */
+        if (i == ci) line[line_len++] = '[';
+        line[line_len++] = ' ';
+        for (int j = 0; j < hdr_len && line_len < (int)sizeof(line) - 1; j++)
+            line[line_len++] = hdr[j];
+        line[line_len++] = ' ';
+        if (i == ci) line[line_len++] = ']';
+        int end = line_len;
+
+        /* draw segment at x position */
+        int x_start = 1 + start;
+        if (i == ci) {
+            /* highlight the active segment */
+            int pair = PAIR_HEADER_TODO + i;
+            if (has_color) attron(COLOR_PAIR(pair));
+            else attron(A_BOLD);
+            move(y, x_start);
+            for (int k = start; k < end; k++)
+                addch((unsigned char)line[k]);
+            if (has_color) attroff(COLOR_PAIR(pair));
+            else attroff(A_BOLD);
+        } else {
+            move(y, x_start);
+            for (int k = start; k < end; k++) {
+                if (has_color) attron(A_DIM);
+                addch((unsigned char)line[k]);
+                if (has_color) attroff(A_DIM);
+            }
+        }
+    }
+}
+
+static void draw_narrow_view(const Board *board)
+{
+    int rows = LINES;
+    int cols = COLS;
+
+    if (rows < MIN_ROWS || cols < MIN_COLS) {
+        const char *msg = "Terminal too small. Resize to at least "
+                          "30 columns x 10 rows.";
+        int y = rows / 2;
+        int x = (cols - (int)strlen(msg)) / 2;
+        if (x < 0) x = 0;
+        mvaddstr(y, x, msg);
+        return;
+    }
+
+    int col_idx = state.sel_col;
+    const Column *col = &board->columns[col_idx];
+    int cw = cols - 2;
+
+    draw_narrow_border(0, cw, cols);
+    draw_narrow_headers(1, cols, board);
+    draw_narrow_separator(2, cols);
+
+    int card_area_start = 3;
+    int card_area_end   = rows - 2;
+    int max_rows        = card_area_end - card_area_start;
+    if (max_rows < 0) max_rows = 0;
+
+    /* Count visible cards in the active column */
+    int vis_count = col_visible_count(board, col_idx);
+
+    /* Draw cards */
+    for (int r = 0; r < max_rows; r++) {
+        move(card_area_start + r, 0);
+        addch(ACS_VLINE);
+
+        int real_idx = col_visible_index(board, col_idx, r);
+        int is_selected = 0;
+        const Card *card = NULL;
+        const char *title = "";
+
+        if (real_idx >= 0 && r < vis_count) {
+            card = &col->cards[real_idx];
+            title = card->title;
+            if (state.sel_card == r)
+                is_selected = 1;
+        }
+
+        draw_card(card_area_start + r, 1, title, cols - 2, is_selected, card);
+
+        move(card_area_start + r, cols - 1);
+        addch(ACS_VLINE);
+    }
+
+    draw_narrow_bottom(card_area_start + max_rows, cols);
+
+    /* "no matches" hint */
+    if (g_filter_len > 0 && vis_count == 0 && col->count > 0) {
+        int hint_y = card_area_start + max_rows + 1;
+        if (hint_y < rows - 2) {
+            move(hint_y, 0);
+            addch(ACS_VLINE);
+            const char *nomsg = "(no matches)";
+            int slen = (int)strlen(nomsg);
+            int pad = (cols - 2 - slen) / 2;
+            if (pad < 0) pad = 0;
+            for (int i = 0; i < pad; i++) addch(' ');
+            for (int i = 0; i < slen; i++)
+                addch((unsigned char)nomsg[i]);
+            for (int i = pad + slen; i < cols - 2; i++) addch(' ');
+            addch(ACS_VLINE);
+        }
+    }
+
+    if (g_filter_active == 1) {
+        draw_filter_bar();
+        return;
+    }
+
+    /* narrow mode hint in status bar */
+    move(rows - 1, 0);
+    if (has_color) attron(COLOR_PAIR(PAIR_STATUSBAR));
+    else attron(A_REVERSE);
+
+    int x = 0;
+    if (g_flash_until && time(NULL) < g_flash_until) {
+        int flen = (int)strlen(g_flash_buf);
+        addch(' '); x++;
+        for (int i = 0; i < flen && x < cols; i++, x++)
+            addch((unsigned char)g_flash_buf[i]);
+        for (; x < cols; x++)
+            addch(' ');
+    } else {
+        /* build status line */
+        int job_count = llm_job_count();
+        int running_count = 0;
+        for (int i = 0; i < job_count; i++) {
+            const LlmJob *j = llm_job_at(i);
+            if (j && j->state == LLM_RUNNING)
+                running_count++;
+        }
+
+        char left[128] = "";
+        int left_len = 0;
+        if (running_count > 0) {
+            char sp = g_spinner_chars[g_spinner_idx % 4];
+            left_len = snprintf(left, sizeof(left),
+                                " %c %d job%s running  ", sp, running_count,
+                                running_count == 1 ? "" : "s");
+        }
+        if (g_filter_len > 0) {
+            int n = snprintf(left + left_len, sizeof(left) - (size_t)left_len,
+                             "filter: %s  ", g_filter_buf);
+            if (n > 0) left_len += n;
+        }
+        if (g_show_archived) {
+            int n = snprintf(left + left_len, sizeof(left) - (size_t)left_len,
+                             "[archives]  ");
+            if (n > 0) left_len += n;
+        }
+
+        const char *hint = "q quit  Tab col  jk nav  a add  e edit  d del  H/L move  x archive  C-A togg arch  / filter";
+        int hint_len = (int)strlen(hint);
+
+        int available = cols - left_len;
+        if (available < 10) {
+            for (int i = 0; i < left_len && x < cols; i++, x++)
+                addch((unsigned char)left[i]);
+            for (; x < cols; x++) addch(' ');
+        } else {
+            for (int i = 0; i < left_len && x < cols; i++, x++)
+                addch((unsigned char)left[i]);
+            int hint_pad = available > hint_len ? (available - hint_len) / 2 : 0;
+            for (int i = 0; i < hint_pad && x < cols; i++, x++) addch(' ');
+            for (int i = 0; i < hint_len && x < cols; i++, x++)
+                addch((unsigned char)hint[i]);
+            for (; x < cols; x++) addch(' ');
+        }
+    }
+
+    if (has_color) attroff(COLOR_PAIR(PAIR_STATUSBAR));
+    else attroff(A_REVERSE);
+}
+
 /* ---- main draw (board + status bar) ---- */
 
 static void tui_draw(const Board *board)
@@ -1119,6 +1433,13 @@ static void tui_draw(const Board *board)
 
     int rows = LINES;
     int cols = COLS;
+
+    /* Narrow mode: single-column view when cols < NARROW_THRESHOLD */
+    if (cols < NARROW_THRESHOLD) {
+        draw_narrow_view(board);
+        refresh();
+        return;
+    }
 
     if (rows < MIN_ROWS || cols < MIN_COLS) {
         const char *msg = "Terminal too small. Resize to at least "
@@ -1506,10 +1827,30 @@ static int handle_detail_input(Board *board, int ch)
         Card *card = board_get_card(board, g_detail_card_id);
         if (card) {
             char buf[INPUT_MAX + 1] = "";
+
+            /* push undo snapshot */
+            UndoOp op;
+            memset(&op, 0, sizeof(op));
+            op.type = UNDO_EDIT_TITLE;
+            op.card_id = g_detail_card_id;
+            op.orig_col = state.sel_col;
+            op.snap_title = card->title ? tstrdup(card->title) : NULL;
+            op.snap_description = NULL;
+            op.snap_archived = card->archived;
+            undo_push(op);
+            g_undo_pending = 0;
+
             if (input_line("Edit title: ", buf, sizeof(buf), card->title) == 0
                 && buf[0] != '\0') {
                 board_edit_card_title(board, g_detail_card_id, buf);
                 autosave(board);
+                g_undo_pending = 1;
+                snprintf(g_flash_buf, sizeof(g_flash_buf), "Title changed — Undo? (u)");
+                g_flash_until = time(NULL) + FLASH_DURATION;
+            } else {
+                undo_pop(&op);
+                free(op.snap_title);
+                g_undo_pending = 0;
             }
         }
         return 1;
@@ -1520,10 +1861,30 @@ static int handle_detail_input(Board *board, int ch)
         if (card) {
             char buf[INPUT_MAX + 1] = "";
             const char *initial = card->description ? card->description : "";
+
+            /* push undo snapshot */
+            UndoOp op;
+            memset(&op, 0, sizeof(op));
+            op.type = UNDO_EDIT_DESC;
+            op.card_id = g_detail_card_id;
+            op.orig_col = state.sel_col;
+            op.snap_title = NULL;
+            op.snap_description = card->description ? tstrdup(card->description) : NULL;
+            op.snap_archived = card->archived;
+            undo_push(op);
+            g_undo_pending = 0;
+
             if (input_line("Edit desc: ", buf, sizeof(buf), initial) == 0
                 && buf[0] != '\0') {
                 board_set_card_description(board, g_detail_card_id, buf);
                 autosave(board);
+                g_undo_pending = 1;
+                snprintf(g_flash_buf, sizeof(g_flash_buf), "Description changed — Undo? (u)");
+                g_flash_until = time(NULL) + FLASH_DURATION;
+            } else {
+                undo_pop(&op);
+                free(op.snap_description);
+                g_undo_pending = 0;
             }
         }
         return 1;
@@ -1533,6 +1894,55 @@ static int handle_detail_input(Board *board, int ch)
     case 'L':
         label_picker_init(board, g_detail_card_id);
         return 1;
+
+    case 'x': {
+        Card *card = board_get_card(board, g_detail_card_id);
+        if (card && !card->archived) {
+            UndoOp op;
+            memset(&op, 0, sizeof(op));
+            op.type = UNDO_ARCHIVE;
+            op.card_id = g_detail_card_id;
+            op.orig_col = state.sel_col;
+            op.orig_pos = state.sel_card;
+            op.snap_title = NULL;
+            op.snap_description = NULL;
+            op.snap_archived = 0;
+            undo_push(op);
+
+            board_set_card_archived(board, g_detail_card_id, 1);
+            autosave(board);
+            g_undo_pending = 1;
+            snprintf(g_flash_buf, sizeof(g_flash_buf), "Card archived — Undo? (u)");
+            g_flash_until = time(NULL) + FLASH_DURATION;
+        }
+        return 1;
+    }
+
+    case 'u': {
+        UndoOp op;
+        if (undo_pop(&op)) {
+            switch (op.type) {
+            case UNDO_EDIT_TITLE:
+                board_edit_card_title(board, op.card_id, op.snap_title);
+                break;
+            case UNDO_EDIT_DESC:
+                board_set_card_description(board, op.card_id, op.snap_description);
+                break;
+            case UNDO_ARCHIVE:
+                board_set_card_archived(board, op.card_id, 0);
+                break;
+            default:
+                break;
+            }
+            free(op.snap_title);
+            free(op.snap_description);
+            autosave(board);
+            g_undo_pending = 0;
+            snprintf(g_flash_buf, sizeof(g_flash_buf), "Undone");
+            g_flash_until = time(NULL) + FLASH_DURATION;
+        }
+        return 1;
+    }
 
     case 'j':
     case KEY_DOWN:
@@ -1631,6 +2041,109 @@ static int get_selected_card(const Board *board, int *id_out)
 
 static int handle_input(Board *board, int ch)
 {
+    int cols = COLS;
+
+    /* Tab / Shift+Tab: cycle columns in narrow mode */
+    if (cols < NARROW_THRESHOLD && (ch == '\t' || ch == KEY_BTAB)) {
+        /* Tab = forward, Shift+Tab = backward */
+        int dir = (ch == KEY_BTAB) ? -1 : 1;
+        state.sel_col += dir;
+        if (state.sel_col < 0) state.sel_col = 2;
+        if (state.sel_col > 2) state.sel_col = 0;
+        clamp_selection(board);
+        return 1;
+    }
+
+    /* h/l in narrow mode: cycle columns */
+    if (cols < NARROW_THRESHOLD && ch == 'h' && state.sel_card < 0) {
+        state.sel_col--;
+        if (state.sel_col < 0) state.sel_col = 2;
+        clamp_selection(board);
+        return 1;
+    }
+    if (cols < NARROW_THRESHOLD && ch == 'l' && state.sel_card < 0) {
+        state.sel_col++;
+        if (state.sel_col > 2) state.sel_col = 0;
+        clamp_selection(board);
+        return 1;
+    }
+
+    /* Ctrl+A: toggle archived visibility */
+    if (ch == 1) {
+        g_show_archived = !g_show_archived;
+        clamp_selection(board);
+        return 1;
+    }
+
+    /* Undo: 'u' */
+    if (ch == 'u') {
+        UndoOp op;
+        if (undo_pop(&op)) {
+            switch (op.type) {
+            case UNDO_DELETE:
+                board_restore_card(board, op.card_id, op.orig_col, op.orig_pos,
+                                   op.snap_title, op.snap_description,
+                                   op.snap_archived);
+                state.sel_col = op.orig_col;
+                state.sel_card = op.orig_pos;
+                break;
+            case UNDO_MOVE:
+                board_move_card(board, op.card_id, op.orig_col);
+                state.sel_col = op.orig_col;
+                state.sel_card = 0;
+                break;
+            case UNDO_EDIT_TITLE:
+                board_edit_card_title(board, op.card_id, op.snap_title);
+                break;
+            case UNDO_EDIT_DESC:
+                board_set_card_description(board, op.card_id, op.snap_description);
+                break;
+            case UNDO_ARCHIVE:
+                board_set_card_archived(board, op.card_id, 0);
+                break;
+            }
+            free(op.snap_title);
+            free(op.snap_description);
+            autosave(board);
+            clamp_selection(board);
+            g_undo_pending = 0;
+            snprintf(g_flash_buf, sizeof(g_flash_buf), "Undone");
+            g_flash_until = time(NULL) + FLASH_DURATION;
+        }
+        return 1;
+    }
+
+    /* Archive: 'x' — soft-archive selected card */
+    if (ch == 'x') {
+        int card_id; const Card *card;
+        int real_idx = 0;
+        if (state.sel_card >= 0 &&
+            (real_idx = col_visible_index(board, state.sel_col, state.sel_card)) >= 0) {
+            card = &board->columns[state.sel_col].cards[real_idx];
+            card_id = card->id;
+
+            /* Save undo snapshot */
+            UndoOp op;
+            memset(&op, 0, sizeof(op));
+            op.type = UNDO_ARCHIVE;
+            op.card_id = card_id;
+            op.orig_col = state.sel_col;
+            op.orig_pos = state.sel_card;
+            op.snap_title = card->title ? tstrdup(card->title) : NULL;
+            op.snap_description = card->description ? tstrdup(card->description) : NULL;
+            op.snap_archived = 0;
+            undo_push(op);
+
+            board_set_card_archived(board, card_id, 1);
+            autosave(board);
+            clamp_selection(board);
+            g_undo_pending = 1;
+            snprintf(g_flash_buf, sizeof(g_flash_buf), "Card archived — Undo? (u)");
+            g_flash_until = time(NULL) + FLASH_DURATION;
+        }
+        return 1;
+    }
+
     /* Ctrl+E: submit enrich for selected card */
     if (ch == 5) { /* Ctrl+E */
         int card_id;
@@ -1741,10 +2254,31 @@ static int handle_input(Board *board, int ch)
             Card *card = board_get_card(board, card_id);
             if (card) {
                 char buf[INPUT_MAX + 1] = "";
+
+                /* push undo snapshot before editing */
+                UndoOp op;
+                memset(&op, 0, sizeof(op));
+                op.type = UNDO_EDIT_TITLE;
+                op.card_id = card_id;
+                op.orig_col = state.sel_col;
+                op.snap_title = card->title ? tstrdup(card->title) : NULL;
+                op.snap_description = NULL;
+                op.snap_archived = card->archived;
+                undo_push(op);
+                g_undo_pending = 0;  /* cleared; set below on success */
+
                 if (input_line("Edit card: ", buf, sizeof(buf), card->title) == 0
                     && buf[0] != '\0') {
                     board_edit_card_title(board, card_id, buf);
                     autosave(board);
+                    g_undo_pending = 1;
+                    snprintf(g_flash_buf, sizeof(g_flash_buf), "Card edited — Undo? (u)");
+                    g_flash_until = time(NULL) + FLASH_DURATION;
+                } else {
+                    /* user cancelled — discard the undo snapshot */
+                    undo_pop(&op);
+                    free(op.snap_title);
+                    g_undo_pending = 0;
                 }
             }
         }
@@ -1755,10 +2289,26 @@ static int handle_input(Board *board, int ch)
     case 'd': {
         int card_id;
         if (get_selected_card(board, &card_id) == 0) {
-            if (confirm("Delete card? (y/n) ")) {
+            Card *card = board_get_card(board, card_id);
+            if (card && confirm("Delete card? (y/n) ")) {
+                /* push undo snapshot before deleting */
+                UndoOp op;
+                memset(&op, 0, sizeof(op));
+                op.type = UNDO_DELETE;
+                op.card_id = card_id;
+                op.orig_col = state.sel_col;
+                op.orig_pos = state.sel_card;
+                op.snap_title = card->title ? tstrdup(card->title) : NULL;
+                op.snap_description = card->description ? tstrdup(card->description) : NULL;
+                op.snap_archived = card->archived;
+                undo_push(op);
+
                 board_delete_card(board, card_id);
                 clamp_selection(board);
                 autosave(board);
+                g_undo_pending = 1;
+                snprintf(g_flash_buf, sizeof(g_flash_buf), "Card deleted — Undo? (u)");
+                g_flash_until = time(NULL) + FLASH_DURATION;
             }
         }
         return 1;
@@ -1769,12 +2319,29 @@ static int handle_input(Board *board, int ch)
     case '<': {
         int card_id;
         if (get_selected_card(board, &card_id) == 0 && state.sel_col > 0) {
+            int src_col = state.sel_col;
             int dest = state.sel_col - 1;
+
+            /* push undo snapshot */
+            UndoOp op;
+            memset(&op, 0, sizeof(op));
+            op.type = UNDO_MOVE;
+            op.card_id = card_id;
+            op.orig_col = src_col;
+            op.orig_pos = state.sel_card;
+            undo_push(op);
+
             if (board_move_card(board, card_id, dest) == 0) {
                 state.sel_col  = dest;
                 int visible = col_visible_count(board, dest);
                 state.sel_card = visible > 0 ? visible - 1 : -1;
                 autosave(board);
+                g_undo_pending = 1;
+                snprintf(g_flash_buf, sizeof(g_flash_buf), "Card moved — Undo? (u)");
+                g_flash_until = time(NULL) + FLASH_DURATION;
+            } else {
+                /* move failed, discard undo */
+                undo_pop(&op);
             }
         }
         return 1;
@@ -1785,12 +2352,28 @@ static int handle_input(Board *board, int ch)
     case '>': {
         int card_id;
         if (get_selected_card(board, &card_id) == 0 && state.sel_col < 2) {
+            int src_col = state.sel_col;
             int dest = state.sel_col + 1;
+
+            /* push undo snapshot */
+            UndoOp op;
+            memset(&op, 0, sizeof(op));
+            op.type = UNDO_MOVE;
+            op.card_id = card_id;
+            op.orig_col = src_col;
+            op.orig_pos = state.sel_card;
+            undo_push(op);
+
             if (board_move_card(board, card_id, dest) == 0) {
                 state.sel_col  = dest;
                 int visible = col_visible_count(board, dest);
                 state.sel_card = visible > 0 ? visible - 1 : -1;
                 autosave(board);
+                g_undo_pending = 1;
+                snprintf(g_flash_buf, sizeof(g_flash_buf), "Card moved — Undo? (u)");
+                g_flash_until = time(NULL) + FLASH_DURATION;
+            } else {
+                undo_pop(&op);
             }
         }
         return 1;

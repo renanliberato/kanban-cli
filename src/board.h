@@ -47,6 +47,15 @@ int  board_set_card_description(Board *b, int id, const char *desc);
 int  board_add_label(Board *b, int id, const char *label);
 int  board_remove_label(Board *b, int id, const char *label);
 
+/* archive / unarchive (M5) */
+int  board_set_card_archived(Board *b, int id, int archived);
+
+/* restore a deleted card at a specific position (undo support, M5).
+   returns new id on success, -1 on error. */
+int  board_restore_card(Board *b, int id, int col, int pos,
+                        const char *title, const char *desc,
+                        int archived);
+
 /* labels: get all labels across the board (from db) */
 int  board_get_all_labels(Board *b, char ***names_out, int *count_out);
 

@@ -145,6 +145,8 @@ _KEY_MAP = {
     "t":             "t",  "D": "D",
     "T":             "T",
     "/":             "/",  "#": "#",
+    "x":             "x",  "u": "u",
+    "Tab":           "\t",  "Ctrl+A": "\x01",
 }
 
 _NAV_TRACK = {
@@ -185,6 +187,29 @@ def _send_key(context, key):
             context.sel_row = 0
 
 
+@when('I press Ctrl+A')
+def step_when_press_ctrl_a(context):
+    """Toggle archived card visibility."""
+    context.child.send("\x01")
+    time.sleep(0.2)
+    # Reset screen buffer so we check fresh output
+    context.screen_buffer = ""
+
+
+@when('I press Tab')
+def step_when_press_tab(context):
+    """Send Tab key."""
+    context.child.send("\t")
+    time.sleep(0.1)
+
+
+@when('I press "{key}" twice')
+def step_when_press_key_twice(context, key):
+    """Press a key two times."""
+    _send_key(context, key)
+    _send_key(context, key)
+
+
 # ---------------------------------------------------------------------------
 # When steps — typing into input bar
 # ---------------------------------------------------------------------------
@@ -193,6 +218,18 @@ def _send_key(context, key):
 def step_when_type(context, text):
     context.child.send(text)
     time.sleep(0.05)
+
+
+@when('I reset the screen buffer')
+def step_reset_screen_buffer(context):
+    """Clear accumulated screen content for fresh assertions."""
+    time.sleep(0.3)
+    try:
+        child = context.child
+        child.read_nonblocking(size=65536, timeout=0.3)
+    except Exception:
+        pass
+    context.screen_buffer = ""
 
 
 @when("I press Enter")

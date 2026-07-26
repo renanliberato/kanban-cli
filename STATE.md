@@ -30,7 +30,7 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - [x] Iteration 3 M3: Non-interactive CLI subcommands + AI enrich flow (human-in-the-loop review)
 - [x] Iteration 3 M4: Card detail view, label picker, fuzzy filter
 
-- [ ] Iteration 3 M5: Adaptive layout + undo + archive
+- [x] Iteration 3 M5: Adaptive layout + undo + archive
 - [ ] Iteration 3 M6: Background jobs polish + multiple boards
 - [ ] Iteration 3 M7: Comments + agent primitives; review flow removal (backlog)
 
@@ -43,7 +43,8 @@ Read this first after any context compaction. PLAN.md has the full plan.
 - `915f6c3` Iteration 2: BDD test suite (behave/gherkin, 36 scenarios, 200 steps, replaces e2e.py)
 - `6a0135e` Add iteration 3 design doc and box usage report
 - `cad21ae` Iter3 M1: SQLite storage with JSON auto-migration (14 files, +276K/-82 lines)
-- `5de7547` Iter3 M3: CLI subcommands + AI enrich with human review (17 files, +2358/-196 lines)
+- `5de7547` Iter3 M3: CLI subcommands + AI enrich with human review
+- `2f58d86` Iter3 M4: card detail view, label picker, fuzzy filter (17 files, +2358/-196 lines)
 
 ## Notes for minions
 - All builds/tests/e2e MUST run on the box, not locally.

@@ -216,6 +216,7 @@ static int cmd_add(Board *b, int argc, char **argv, int subcmd_idx)
 static int cmd_list(const Board *b, int argc, char **argv, int subcmd_idx)
 {
     int filter_col = -1;
+    int show_archived = 0;
 
     for (int i = subcmd_idx + 1; i < argc; i++) {
         if (strcmp(argv[i], "--col") == 0 && i + 1 < argc) {
@@ -224,6 +225,8 @@ static int cmd_list(const Board *b, int argc, char **argv, int subcmd_idx)
                 fprintf(stderr, "kanban: invalid column '%s'\n", argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--archived") == 0) {
+            show_archived = 1;
         }
     }
 
@@ -231,6 +234,8 @@ static int cmd_list(const Board *b, int argc, char **argv, int subcmd_idx)
         if (filter_col >= 0 && ci != filter_col) continue;
         const Column *col = &b->columns[ci];
         for (int i = 0; i < col->count; i++) {
+            if (!show_archived && col->cards[i].archived)
+                continue;
             printf("%d %s %s\n", col->cards[i].id,
                    col_name(ci), col->cards[i].title);
         }

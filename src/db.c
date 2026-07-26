@@ -955,3 +955,57 @@ int db_get_card_labels(db_t *db, int card_id, char ***names_out, int *count_out)
     *count_out = idx;
     return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* M5: archive / restore (undo)                                       */
+/* ------------------------------------------------------------------ */
+
+int db_set_card_archived(db_t *db, int id, int archived)
+{
+    if (!db || !db->conn) return -1;
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "UPDATE cards SET archived = ?, updated_at = datetime('now') "
+        "WHERE id = ?", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, archived ? 1 : 0);
+    sqlite3_bind_int(stmt, 2, id);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_restore_card(db_t *db, int col, int id, const char *title,
+                    const char *desc, int archived)
+{
+    if (!db || !db->conn || !title) return -1;
+    int col_id = col + 1;
+
+    /* find next position in that column */
+    sqlite3_stmt *stmt = NULL;
+    int pos = 0;
+    int rc = sqlite3_prepare_v2(db->conn,
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM cards "
+        "WHERE column_id = ?", -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, col_id);
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            pos = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+    }
+
+    rc = sqlite3_prepare_v2(db->conn,
+        "INSERT INTO cards (id, column_id, title, description, archived, position) "
+        "VALUES (?, ?, ?, ?, ?, ?)", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, id);
+    sqlite3_bind_int(stmt, 2, col_id);
+    sqlite3_bind_text(stmt, 3, title, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, desc ? desc : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, archived ? 1 : 0);
+    sqlite3_bind_int(stmt, 6, pos);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
